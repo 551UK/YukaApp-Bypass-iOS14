@@ -1,0 +1,25 @@
+name: Build and release
+on:
+  push:
+    branches: [main]
+    paths: ['YukaBypass.m', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build signed iOS 14 rootful tweak
+        run: bash build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YukaApp-Bypass-iOS14
+          path: packages/*.deb
+          if-no-files-found: error
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v1.0.0 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.0" --notes "Makes Yuka 4.38 report version 5.3. For iOS 14 rootful jailbreaks. Install, then close and reopen Yuka. Built and signed; device testing needed."

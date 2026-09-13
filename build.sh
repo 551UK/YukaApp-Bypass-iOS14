@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+mkdir -p build packages
+sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
+xcrun --sdk iphoneos clang -isysroot "$sdk_path" \
+ -arch arm64 -arch arm64e -miphoneos-version-min=14.0 \
+ -dynamiclib -fobjc-arc -O2 -Wall -Wextra -Werror -framework Foundation \
+ -install_name /Library/MobileSubstrate/DynamicLibraries/YukaBypass.dylib \
+ YukaBypass.m -o build/YukaBypass.dylib
+codesign --force --sign - --timestamp=none build/YukaBypass.dylib
+codesign --verify --strict build/YukaBypass.dylib
+xcrun lipo build/YukaBypass.dylib -verify_arch arm64 arm64e
+python3 package.py

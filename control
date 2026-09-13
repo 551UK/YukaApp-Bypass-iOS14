@@ -1,0 +1,10 @@
+Package: com.551uk.yukabypass14
+Name: Yuka Bypass iOS 14
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Makes Yuka report app version 5.3 on iOS 14.
+Maintainer: 551UK
+Author: 551UK
+Section: Tweaks
+Depends: firmware (>= 14.0), firmware (<< 15.0), mobilesubstrate
+Homepage: https://github.com/551UK/YukaApp-Bypass-iOS14
