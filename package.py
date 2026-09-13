@@ -17,7 +17,7 @@ control = archive([('./control', (root/'control').read_bytes(), 0o644)])
 prefix = './Library/MobileSubstrate/DynamicLibraries/'
 data = archive([(prefix+'YukaBypass.dylib', (root/'build/YukaBypass.dylib').read_bytes(), 0o755),
                 (prefix+'YukaBypass.plist', plistlib.dumps({'Filter': {'Bundles': ['yuca.scanner']}}), 0o644)])
-package = root/'packages/com.551uk.yukabypass14_1.0.5_iphoneos-arm.deb'
+package = root/'packages/com.551uk.yukabypass14_1.0.6_iphoneos-arm.deb'
 with package.open('wb') as out:
     out.write(b'!<arch>\n')
     for name, content in [('debian-binary', b'2.0\n'), ('control.tar.gz', control), ('data.tar.gz', data)]:

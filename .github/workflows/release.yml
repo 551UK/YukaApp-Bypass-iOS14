@@ -22,4 +22,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.5 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.5" --notes "Updates the Firebase API key and storage bucket to match the supplied working Yuka 5.3 app. Also replaces the old key in Google API requests. Install, fully close and reopen Yuka, then test history and scanning. Includes diagnostics if the error remains. Device testing required."
+          gh release create v1.0.6 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.6" --notes "Recovery build: removes the Firebase options and storage hooks introduced in 1.0.5. Updates the old API key only in outgoing Google requests and shows a replacement count in Info. Install over 1.0.5 and reopen Yuka. Device testing required."

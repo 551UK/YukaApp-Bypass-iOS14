@@ -12,7 +12,7 @@ static NSString *LastProductResult;
 static NSString *LastAPIResult;
 static NSString *FirebaseStatus = @"No Firebase callback observed";
 static NSString *FirebaseHookStatus = @"Installing";
-static BOOL FirebaseConfigHooked;
+static NSUInteger FirebaseKeyRewrites;
 static NSString *HookStatus = @"Starting";
 static UIWindow *ActiveWindow(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -32,7 +32,7 @@ static NSString *DiagnosticSummary(void) {
     if ([authClass respondsToSelector:@selector(auth)]) auth = ((id (*)(id, SEL))objc_msgSend)(authClass, @selector(auth));
     id user = nil;
     if ([auth respondsToSelector:@selector(currentUser)]) user = ((id (*)(id, SEL))objc_msgSend)(auth, @selector(currentUser));
-    return [NSString stringWithFormat:@"Tweak 1.0.5 loaded\n%@\nFirebase config: %@\nFirebase hooks: %@\nSigned in: %@\nRequests observed: %lu\n\nProduct: %@\n\nAPI: %@\n\nFirebase: %@\n\n%@", HookStatus, FirebaseConfigHooked ? @"5.3 key/bucket hooks active" : @"NOT hooked", FirebaseHookStatus, user ? @"yes" : @"no", (unsigned long)RequestCount,
+    return [NSString stringWithFormat:@"Tweak 1.0.6 loaded\n%@\nFirebase config: %@\nFirebase hooks: %@\nSigned in: %@\nRequests observed: %lu\n\nProduct: %@\n\nAPI: %@\n\nFirebase: %@\n\n%@", HookStatus, [NSString stringWithFormat:@"Request-only update (%lu replacements)", (unsigned long)FirebaseKeyRewrites], FirebaseHookStatus, user ? @"yes" : @"no", (unsigned long)RequestCount,
         LastProductResult ?: @"No product request captured", LastAPIResult ?: @"No Yuka API request captured", FirebaseStatus,
         RecentResults.count ? [RecentResults componentsJoinedByString:@"\n"] : @"No relevant events yet."];
 }
@@ -59,7 +59,7 @@ static void ShowDiagnosticButton(void) {
     static YukaDiagnosticButton *button;
     if (!button) {
         button = [YukaDiagnosticButton buttonWithType:UIButtonTypeSystem];
-        [button setTitle:@"Yuka 1.0.5 • Info" forState:UIControlStateNormal];
+        [button setTitle:@"Yuka 1.0.6 • Info" forState:UIControlStateNormal];
         [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
         button.backgroundColor = [UIColor colorWithRed:0 green:0.38 blue:0.3 alpha:0.95];
         button.layer.cornerRadius = 8;
@@ -89,33 +89,6 @@ static void Hook(Class cls, SEL sel, IMP replacement, IMP *original) {
     *original = method_getImplementation(method);
     if (!class_addMethod(cls, sel, replacement, method_getTypeEncoding(method)))
         method_setImplementation(class_getInstanceMethod(cls, sel), replacement);
-}
-static id (*OriginalFirebaseKey)(id, SEL);
-static id FirebaseKey(id self, SEL cmd) {
-    id value = OriginalFirebaseKey(self, cmd);
-    return [value isEqual:OldFirebaseKey] ? CurrentFirebaseKey : value;
-}
-static void (*OriginalSetFirebaseKey)(id, SEL, NSString *);
-static void SetFirebaseKey(id self, SEL cmd, NSString *value) {
-    OriginalSetFirebaseKey(self, cmd, [value isEqualToString:OldFirebaseKey] ? CurrentFirebaseKey : value);
-}
-static id (*OriginalFirebaseBucket)(id, SEL);
-static id FirebaseBucket(id self, SEL cmd) {
-    id value = OriginalFirebaseBucket(self, cmd);
-    return [value isEqual:OldFirebaseBucket] ? CurrentFirebaseBucket : value;
-}
-static void (*OriginalSetFirebaseBucket)(id, SEL, NSString *);
-static void SetFirebaseBucket(id self, SEL cmd, NSString *value) {
-    OriginalSetFirebaseBucket(self, cmd, [value isEqualToString:OldFirebaseBucket] ? CurrentFirebaseBucket : value);
-}
-static void InstallFirebaseConfig(void) {
-    Class options = NSClassFromString(@"FIROptions");
-    if (!options) return;
-    if (!OriginalFirebaseKey) Hook(options, NSSelectorFromString(@"APIKey"), (IMP)FirebaseKey, (IMP *)&OriginalFirebaseKey);
-    if (!OriginalSetFirebaseKey) Hook(options, NSSelectorFromString(@"setAPIKey:"), (IMP)SetFirebaseKey, (IMP *)&OriginalSetFirebaseKey);
-    if (!OriginalFirebaseBucket) Hook(options, NSSelectorFromString(@"storageBucket"), (IMP)FirebaseBucket, (IMP *)&OriginalFirebaseBucket);
-    if (!OriginalSetFirebaseBucket) Hook(options, NSSelectorFromString(@"setStorageBucket:"), (IMP)SetFirebaseBucket, (IMP *)&OriginalSetFirebaseBucket);
-    FirebaseConfigHooked = OriginalFirebaseKey && OriginalFirebaseBucket;
 }
 static id (*OriginalInfoValue)(id, SEL, NSString *);
 static id InfoValue(id self, SEL cmd, NSString *key) {
@@ -178,11 +151,14 @@ static NSURLRequest *FinalRequest(NSURLRequest *request) {
             if ([item.name isEqualToString:@"key"] && [item.value isEqualToString:OldFirebaseKey]) {
                 [items addObject:[NSURLQueryItem queryItemWithName:item.name value:CurrentFirebaseKey]];
                 changed = YES;
+                dispatch_async(dispatch_get_main_queue(), ^{ FirebaseKeyRewrites++; });
             } else [items addObject:item];
         }
         if (changed) { url.queryItems = items; if (url.URL) copy.URL = url.URL; }
-        if ([[request valueForHTTPHeaderField:@"X-Goog-Api-Key"] isEqualToString:OldFirebaseKey])
+        if ([[request valueForHTTPHeaderField:@"X-Goog-Api-Key"] isEqualToString:OldFirebaseKey]) {
             [copy setValue:CurrentFirebaseKey forHTTPHeaderField:@"X-Goog-Api-Key"];
+            dispatch_async(dispatch_get_main_queue(), ^{ FirebaseKeyRewrites++; });
+        }
     }
     return copy;
 }
@@ -408,7 +384,6 @@ __attribute__((constructor)) static void Initialize(void) {
         HookFunction hookFunction = (HookFunction)dlsym(substrate ?: RTLD_DEFAULT, "MSHookFunction");
         if (hookFunction) hookFunction((void *)CFBundleGetValueForInfoDictionaryKey, (void *)CFValue, (void **)&OriginalCFValue);
         else NSLog(@"[YukaBypass] CoreFoundation hook unavailable; NSBundle and header hooks remain active.");
-        InstallFirebaseConfig();
         InstallFirebaseHooks();
         Class delegateClass = NSClassFromString(@"_TtC9Alamofire15SessionDelegate");
         if (delegateClass) {
@@ -423,8 +398,7 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
                 (void)timer;
-                InstallFirebaseConfig();
-        InstallFirebaseHooks();
+                InstallFirebaseHooks();
                 Class lateDelegate = NSClassFromString(@"_TtC9Alamofire15SessionDelegate");
                 if (lateDelegate && !OriginalDelegateData) Hook(lateDelegate, @selector(URLSession:dataTask:didReceiveData:), (IMP)DelegateData, (IMP *)&OriginalDelegateData);
                 if (lateDelegate && !OriginalDelegateComplete) Hook(lateDelegate, @selector(URLSession:task:didCompleteWithError:), (IMP)DelegateComplete, (IMP *)&OriginalDelegateComplete);
