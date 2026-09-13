@@ -4,7 +4,61 @@
 #import <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
 
+static NSMutableArray<NSString *> *RecentResults;
+static NSUInteger RequestCount;
+static NSString *HookStatus = @"Starting";
+static UIWindow *ActiveWindow(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (scene.activationState != UISceneActivationStateForegroundActive || ![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) if (window.isKeyWindow) return window;
+    }
+    // Yuka 4.38 may use the pre-scene UIApplication lifecycle on iOS 14.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    for (UIWindow *window in UIApplication.sharedApplication.windows) if (window.isKeyWindow) return window;
+#pragma clang diagnostic pop
+    return nil;
+}
+static NSString *DiagnosticSummary(void) {
+    return [NSString stringWithFormat:@"Tweak 1.0.3 loaded\n%@\nRequests observed: %lu\n\n%@", HookStatus, (unsigned long)RequestCount,
+        RecentResults.count ? [RecentResults componentsJoinedByString:@"\n\n"] : @"No completed requests captured yet. Scan a product, then tap this button again."];
+}
+@interface YukaDiagnosticButton : UIButton
+- (void)showResult;
+@end
+@implementation YukaDiagnosticButton
+- (void)showResult {
+    UIViewController *controller = ActiveWindow().rootViewController;
+    while (controller.presentedViewController) controller = controller.presentedViewController;
+    if (!controller) return;
+    if ([controller isKindOfClass:UIAlertController.class]) {
+        ((UIAlertController *)controller).message = DiagnosticSummary();
+        return;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Yuka diagnostics" message:DiagnosticSummary() preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [controller presentViewController:alert animated:YES completion:nil];
+}
+@end
+static void ShowDiagnosticButton(void) {
+    UIWindow *window = ActiveWindow();
+    if (!window) return;
+    static YukaDiagnosticButton *button;
+    if (!button) {
+        button = [YukaDiagnosticButton buttonWithType:UIButtonTypeSystem];
+        [button setTitle:@"Yuka 1.0.3 • Info" forState:UIControlStateNormal];
+        [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        button.backgroundColor = [UIColor colorWithRed:0 green:0.38 blue:0.3 alpha:0.95];
+        button.layer.cornerRadius = 8;
+        [button addTarget:button action:@selector(showResult) forControlEvents:UIControlEventTouchUpInside];
+        button.accessibilityLabel = @"Yuka diagnostic results";
+    }
+    button.frame = CGRectMake(MAX(8, window.bounds.size.width - 160), window.safeAreaInsets.top + 6, 150, 34);
+    if (button.superview != window) [window addSubview:button];
+    [window bringSubviewToFront:button];
+}
 static NSString *const SpoofVersion = @"5.3";
+static NSString *const SpoofBuild = @"2654";
 static BOOL IsVersionHeader(id key) {
     return [key isKindOfClass:NSString.class] &&
         [(NSString *)key caseInsensitiveCompare:@"X-Yuka-App-Version"] == NSOrderedSame;
@@ -27,6 +81,7 @@ static id (*OriginalInfoValue)(id, SEL, NSString *);
 static id InfoValue(id self, SEL cmd, NSString *key) {
     if (self == NSBundle.mainBundle && [key isEqualToString:@"CFBundleShortVersionString"])
         return SpoofVersion;
+    if (self == NSBundle.mainBundle && [key isEqualToString:@"CFBundleVersion"]) return SpoofBuild;
     return OriginalInfoValue(self, cmd, key);
 }
 static NSDictionary *(*OriginalInfo)(id, SEL);
@@ -35,6 +90,7 @@ static NSDictionary *Info(id self, SEL cmd) {
     if (self != NSBundle.mainBundle || !value) return value;
     NSMutableDictionary *copy = [value mutableCopy];
     copy[@"CFBundleShortVersionString"] = SpoofVersion;
+    copy[@"CFBundleVersion"] = SpoofBuild;
     return copy;
 }
 static void (*OriginalSet)(id, SEL, NSString *, NSString *);
@@ -63,12 +119,13 @@ static CFTypeRef CFValue(CFBundleRef bundle, CFStringRef key) {
     if (bundle == CFBundleGetMainBundle() && key &&
         CFEqual(key, CFSTR("CFBundleShortVersionString")))
         return (__bridge CFTypeRef)SpoofVersion;
+    if (bundle == CFBundleGetMainBundle() && key && CFEqual(key, CFSTR("CFBundleVersion"))) return (__bridge CFTypeRef)SpoofBuild;
     return OriginalCFValue(bundle, key);
 }
 static NSURLRequest *FinalRequest(NSURLRequest *request) {
     if (!request) return request;
     NSString *host = request.URL.host.lowercaseString;
-    BOOL yukaHost = [host isEqualToString:@"yuka.io"] || [host hasSuffix:@".yuka.io"];
+    BOOL yukaHost = [host isEqualToString:@"yuka.io"] || [host hasSuffix:@".yuka.io"] || [host isEqualToString:@"goodtoucan.com"] || [host hasSuffix:@".goodtoucan.com"];
     if (!yukaHost && ![request valueForHTTPHeaderField:@"X-Yuka-App-Version"]) return request;
     NSMutableURLRequest *copy = [request mutableCopy];
     [copy setValue:SpoofVersion forHTTPHeaderField:@"X-Yuka-App-Version"];
@@ -78,8 +135,7 @@ typedef void (^Completion)(NSData *, NSURLResponse *, NSError *);
 // Diagnostic output deliberately excludes URLs, tokens, headers and response values.
 static void ReportProductResult(NSURLRequest *request, NSData *data, NSURLResponse *response, NSError *error) {
     NSString *host = request.URL.host.lowercaseString;
-    if (!([host isEqualToString:@"goodtoucan.com"] || [host hasSuffix:@".goodtoucan.com"])) return;
-    if (![request.URL.path containsString:@"/product/"]) return;
+    if (!host.length) return;
     NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class] ? [(NSHTTPURLResponse *)response statusCode] : 0;
     NSString *shape = @"No JSON body";
     if (data.length) {
@@ -96,30 +152,18 @@ static void ReportProductResult(NSURLRequest *request, NSData *data, NSURLRespon
     NSString *detail = [NSString stringWithFormat:@"HTTP: %ld\nTransport: %@ (%ld)\nType: %@\nBytes: %lu\n%@\n\nPlease screenshot this result. No account tokens or response values are shown.",
         (long)status, error.domain ?: @"No transport error", (long)error.code,
         response.MIMEType ?: @"none", (unsigned long)data.length, shape];
+    BOOL product = [request.URL.path containsString:@"/product/"];
+    NSString *category = product ? @"Product" : ([host hasSuffix:@"goodtoucan.com"] ? @"Yuka API" : @"Other service");
     dispatch_async(dispatch_get_main_queue(), ^{
-        static CFAbsoluteTime lastShown = 0;
-        if (CFAbsoluteTimeGetCurrent() - lastShown < 10) return;
-        UIWindow *window = nil;
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (scene.activationState != UISceneActivationStateForegroundActive || ![scene isKindOfClass:UIWindowScene.class]) continue;
-            for (UIWindow *candidate in ((UIWindowScene *)scene).windows) if (candidate.isKeyWindow) window = candidate;
-        }
-        UIViewController *controller = window.rootViewController;
-        while (controller.presentedViewController) controller = controller.presentedViewController;
-        if (!controller) return;
-        if ([controller isKindOfClass:UIAlertController.class]) {
-            ((UIAlertController *)controller).message = [NSString stringWithFormat:@"%@\n\n%@", ((UIAlertController *)controller).message ?: @"", detail];
-            lastShown = CFAbsoluteTimeGetCurrent();
-            return;
-        }
-        lastShown = CFAbsoluteTimeGetCurrent();
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Yuka request diagnostic" message:detail preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [controller presentViewController:alert animated:YES completion:nil];
+        if (!RecentResults) RecentResults = [NSMutableArray array];
+        [RecentResults addObject:[NSString stringWithFormat:@"%@: %@", category, detail]];
+        if (RecentResults.count > 4) [RecentResults removeObjectAtIndex:0];
+        ShowDiagnosticButton();
     });
 }
 static NSURLSessionDataTask *(*OriginalDataCompletion)(id, SEL, NSURLRequest *, Completion);
 static NSURLSessionDataTask *DataCompletion(id self, SEL cmd, NSURLRequest *request, Completion completion) {
+    dispatch_async(dispatch_get_main_queue(), ^{ RequestCount++; });
     if (!completion) return OriginalDataCompletion(self, cmd, FinalRequest(request), nil);
     return OriginalDataCompletion(self, cmd, FinalRequest(request), ^(NSData *data, NSURLResponse *response, NSError *error) {
         ReportProductResult(request, data, response, error);
@@ -128,6 +172,7 @@ static NSURLSessionDataTask *DataCompletion(id self, SEL cmd, NSURLRequest *requ
 }
 static NSURLSessionDataTask *(*OriginalData)(id, SEL, NSURLRequest *);
 static NSURLSessionDataTask *Data(id self, SEL cmd, NSURLRequest *request) {
+    dispatch_async(dispatch_get_main_queue(), ^{ RequestCount++; });
     return OriginalData(self, cmd, FinalRequest(request));
 }
 static NSURLSessionUploadTask *(*OriginalUpload)(id, SEL, NSURLRequest *, NSData *, Completion);
@@ -181,6 +226,17 @@ __attribute__((constructor)) static void Initialize(void) {
         Hook(sessionClass, @selector(dataTaskWithRequest:completionHandler:), (IMP)DataCompletion, (IMP *)&OriginalDataCompletion);
         Hook(sessionClass, @selector(dataTaskWithRequest:), (IMP)Data, (IMP *)&OriginalData);
         Hook(sessionClass, @selector(uploadTaskWithRequest:fromData:completionHandler:), (IMP)Upload, (IMP *)&OriginalUpload);
+        HookStatus = [NSString stringWithFormat:@"Alamofire: %@ / %@\nSession: %@", OriginalDelegateData ? @"data hooked" : @"data missing", OriginalDelegateComplete ? @"completion hooked" : @"completion missing", OriginalData ? @"hooked" : @"missing"];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
+                (void)timer;
+                Class lateDelegate = NSClassFromString(@"_TtC9Alamofire15SessionDelegate");
+                if (lateDelegate && !OriginalDelegateData) Hook(lateDelegate, @selector(URLSession:dataTask:didReceiveData:), (IMP)DelegateData, (IMP *)&OriginalDelegateData);
+                if (lateDelegate && !OriginalDelegateComplete) Hook(lateDelegate, @selector(URLSession:task:didCompleteWithError:), (IMP)DelegateComplete, (IMP *)&OriginalDelegateComplete);
+                HookStatus = [NSString stringWithFormat:@"Alamofire: %@ / %@\nSession: %@", OriginalDelegateData ? @"data hooked" : @"data missing", OriginalDelegateComplete ? @"completion hooked" : @"completion missing", OriginalData ? @"hooked" : @"missing"];
+                ShowDiagnosticButton();
+            }];
+        });
         Class requestClass = object_getClass(request);
         Hook(requestClass, @selector(setValue:forHTTPHeaderField:), (IMP)SetHeader, (IMP *)&OriginalSet);
         if (OriginalSet) Hook(requestClass, @selector(addValue:forHTTPHeaderField:), (IMP)AddHeader, (IMP *)&OriginalAdd);

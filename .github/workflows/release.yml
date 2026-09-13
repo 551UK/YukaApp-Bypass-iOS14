@@ -22,4 +22,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.2 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.2" --notes "Diagnostic build for Yuka 4.38 on iOS 14 rootful. Scan a product and screenshot the request diagnostic. Shows HTTP status and response shape without account tokens. This is not a confirmed fix."
+          gh release create v1.0.3 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.3" --notes "Spoofs Yuka 5.3 and its actual build 2654 on iOS 14 rootful. Forces the version header on the confirmed Yuka API hosts. Shows a Yuka 1.0.3 Info button to confirm injection. Scan a product, tap Info, and screenshot the results. Shows HTTP status and response shape without account tokens. This is not a confirmed fix."
