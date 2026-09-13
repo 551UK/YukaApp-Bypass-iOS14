@@ -2,7 +2,7 @@ name: Build and release
 on:
   push:
     branches: [main]
-    paths: ['YukaBypass.m', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
+    paths: ['YukaBypass.m', 'YukaFirebaseConfig.h', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write
@@ -22,4 +22,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.4 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.4" --notes "Diagnostic update: keeps product/API results separate from background traffic and reports Firebase authentication/database errors. Install, reopen Yuka, scan, then tap Info. Not a confirmed compatibility fix."
+          gh release create v1.0.5 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.5" --notes "Updates the Firebase API key and storage bucket to match the supplied working Yuka 5.3 app. Also replaces the old key in Google API requests. Install, fully close and reopen Yuka, then test history and scanning. Includes diagnostics if the error remains. Device testing required."
