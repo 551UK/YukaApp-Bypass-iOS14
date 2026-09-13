@@ -22,4 +22,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.0 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.0" --notes "Makes Yuka 4.38 report version 5.3. For iOS 14 rootful jailbreaks. Install, then close and reopen Yuka. Built and signed; device testing needed."
+          gh release create v1.0.1 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.1" --notes "Makes Yuka 4.38 report version 5.3. For iOS 14 rootful jailbreaks. Install, then close and reopen Yuka. Built and signed; device testing needed."

@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
 
 static NSString *const SpoofVersion = @"5.3";
 static BOOL IsVersionHeader(id key) {
@@ -54,12 +56,52 @@ static void (*OriginalAdditional)(id, SEL, NSDictionary *);
 static void AdditionalHeaders(id self, SEL cmd, NSDictionary *headers) {
     OriginalAdditional(self, cmd, VersionHeaders(headers));
 }
+// Cover CoreFoundation callers that bypass NSBundle's Objective-C methods.
+static CFTypeRef (*OriginalCFValue)(CFBundleRef, CFStringRef);
+static CFTypeRef CFValue(CFBundleRef bundle, CFStringRef key) {
+    if (bundle == CFBundleGetMainBundle() && key &&
+        CFEqual(key, CFSTR("CFBundleShortVersionString")))
+        return (__bridge CFTypeRef)SpoofVersion;
+    return OriginalCFValue(bundle, key);
+}
+static NSURLRequest *FinalRequest(NSURLRequest *request) {
+    if (!request) return request;
+    NSString *host = request.URL.host.lowercaseString;
+    BOOL yukaHost = [host isEqualToString:@"yuka.io"] || [host hasSuffix:@".yuka.io"];
+    if (!yukaHost && ![request valueForHTTPHeaderField:@"X-Yuka-App-Version"]) return request;
+    NSMutableURLRequest *copy = [request mutableCopy];
+    [copy setValue:SpoofVersion forHTTPHeaderField:@"X-Yuka-App-Version"];
+    return copy;
+}
+typedef void (^Completion)(NSData *, NSURLResponse *, NSError *);
+static NSURLSessionDataTask *(*OriginalDataCompletion)(id, SEL, NSURLRequest *, Completion);
+static NSURLSessionDataTask *DataCompletion(id self, SEL cmd, NSURLRequest *request, Completion completion) {
+    return OriginalDataCompletion(self, cmd, FinalRequest(request), completion);
+}
+static NSURLSessionDataTask *(*OriginalData)(id, SEL, NSURLRequest *);
+static NSURLSessionDataTask *Data(id self, SEL cmd, NSURLRequest *request) {
+    return OriginalData(self, cmd, FinalRequest(request));
+}
+static NSURLSessionUploadTask *(*OriginalUpload)(id, SEL, NSURLRequest *, NSData *, Completion);
+static NSURLSessionUploadTask *Upload(id self, SEL cmd, NSURLRequest *request, NSData *body, Completion completion) {
+    return OriginalUpload(self, cmd, FinalRequest(request), body, completion);
+}
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"yuca.scanner"]) return;
         Hook(object_getClass(NSBundle.mainBundle), @selector(objectForInfoDictionaryKey:), (IMP)InfoValue, (IMP *)&OriginalInfoValue);
         Hook(object_getClass(NSBundle.mainBundle), @selector(infoDictionary), (IMP)Info, (IMP *)&OriginalInfo);
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://app.yuka.io"]];
+        void *substrate = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
+        if (!substrate) substrate = dlopen("/usr/lib/libsubstrate.dylib", RTLD_NOW);
+        typedef void (*HookFunction)(void *, void *, void **);
+        HookFunction hookFunction = (HookFunction)dlsym(substrate ?: RTLD_DEFAULT, "MSHookFunction");
+        if (hookFunction) hookFunction((void *)CFBundleGetValueForInfoDictionaryKey, (void *)CFValue, (void **)&OriginalCFValue);
+        else NSLog(@"[YukaBypass] CoreFoundation hook unavailable; NSBundle and header hooks remain active.");
+        Class sessionClass = object_getClass(NSURLSession.sharedSession);
+        Hook(sessionClass, @selector(dataTaskWithRequest:completionHandler:), (IMP)DataCompletion, (IMP *)&OriginalDataCompletion);
+        Hook(sessionClass, @selector(dataTaskWithRequest:), (IMP)Data, (IMP *)&OriginalData);
+        Hook(sessionClass, @selector(uploadTaskWithRequest:fromData:completionHandler:), (IMP)Upload, (IMP *)&OriginalUpload);
         Class requestClass = object_getClass(request);
         Hook(requestClass, @selector(setValue:forHTTPHeaderField:), (IMP)SetHeader, (IMP *)&OriginalSet);
         if (OriginalSet) Hook(requestClass, @selector(addValue:forHTTPHeaderField:), (IMP)AddHeader, (IMP *)&OriginalAdd);
