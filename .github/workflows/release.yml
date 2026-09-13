@@ -2,7 +2,7 @@ name: Build and release
 on:
   push:
     branches: [main]
-    paths: ['YukaBypass.m', 'YukaFirebaseConfig.h', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
+    paths: ['YukaBypass.m', 'YukaFirebaseConfig.h', 'YukaFirebaseKeyGetter.m', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write
@@ -22,4 +22,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.6 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.6" --notes "Recovery build: removes the Firebase options and storage hooks introduced in 1.0.5. Updates the old API key only in outgoing Google requests and shows a replacement count in Info. Install over 1.0.5 and reopen Yuka. Device testing required."
+          gh release create v1.0.7 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.7" --notes "Targets the Firestore OFFLINE failure without restoring the launch-breaking 1.0.5 hooks. Adds only a read-only FIROptions APIKey getter override so Firebase/Firestore sees the Yuka 5.3 client key. No Firebase setters or storage bucket hooks. Keeps the 5.3 app/build spoof and outgoing Google request rewrite. Device testing required."
