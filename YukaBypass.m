@@ -1,11 +1,16 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
 
 static NSMutableArray<NSString *> *RecentResults;
 static NSUInteger RequestCount;
+static NSString *LastProductResult;
+static NSString *LastAPIResult;
+static NSString *FirebaseStatus = @"No Firebase callback observed";
+static NSString *FirebaseHookStatus = @"Installing";
 static NSString *HookStatus = @"Starting";
 static UIWindow *ActiveWindow(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -20,8 +25,14 @@ static UIWindow *ActiveWindow(void) {
     return nil;
 }
 static NSString *DiagnosticSummary(void) {
-    return [NSString stringWithFormat:@"Tweak 1.0.3 loaded\n%@\nRequests observed: %lu\n\n%@", HookStatus, (unsigned long)RequestCount,
-        RecentResults.count ? [RecentResults componentsJoinedByString:@"\n\n"] : @"No completed requests captured yet. Scan a product, then tap this button again."];
+    id auth = nil;
+    Class authClass = NSClassFromString(@"FIRAuth");
+    if ([authClass respondsToSelector:@selector(auth)]) auth = ((id (*)(id, SEL))objc_msgSend)(authClass, @selector(auth));
+    id user = nil;
+    if ([auth respondsToSelector:@selector(currentUser)]) user = ((id (*)(id, SEL))objc_msgSend)(auth, @selector(currentUser));
+    return [NSString stringWithFormat:@"Tweak 1.0.4 loaded\n%@\nFirebase hooks: %@\nSigned in: %@\nRequests observed: %lu\n\nProduct: %@\n\nAPI: %@\n\nFirebase: %@\n\n%@", HookStatus, FirebaseHookStatus, user ? @"yes" : @"no", (unsigned long)RequestCount,
+        LastProductResult ?: @"No product request captured", LastAPIResult ?: @"No Yuka API request captured", FirebaseStatus,
+        RecentResults.count ? [RecentResults componentsJoinedByString:@"\n"] : @"No relevant events yet."];
 }
 @interface YukaDiagnosticButton : UIButton
 - (void)showResult;
@@ -46,7 +57,7 @@ static void ShowDiagnosticButton(void) {
     static YukaDiagnosticButton *button;
     if (!button) {
         button = [YukaDiagnosticButton buttonWithType:UIButtonTypeSystem];
-        [button setTitle:@"Yuka 1.0.3 • Info" forState:UIControlStateNormal];
+        [button setTitle:@"Yuka 1.0.4 • Info" forState:UIControlStateNormal];
         [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
         button.backgroundColor = [UIColor colorWithRed:0 green:0.38 blue:0.3 alpha:0.95];
         button.layer.cornerRadius = 8;
@@ -131,6 +142,16 @@ static NSURLRequest *FinalRequest(NSURLRequest *request) {
     [copy setValue:SpoofVersion forHTTPHeaderField:@"X-Yuka-App-Version"];
     return copy;
 }
+static void ObserveStart(NSURLRequest *request) {
+    NSString *host = request.URL.host.lowercaseString;
+    BOOL api = [host isEqualToString:@"goodtoucan.com"] || [host hasSuffix:@".goodtoucan.com"];
+    if (!api) return;
+    BOOL product = [request.URL.path containsString:@"/product/"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (product) LastProductResult = @"Request created; awaiting response";
+        else LastAPIResult = @"Request created; awaiting response";
+    });
+}
 typedef void (^Completion)(NSData *, NSURLResponse *, NSError *);
 // Diagnostic output deliberately excludes URLs, tokens, headers and response values.
 static void ReportProductResult(NSURLRequest *request, NSData *data, NSURLResponse *response, NSError *error) {
@@ -149,21 +170,25 @@ static void ReportProductResult(NSURLRequest *request, NSData *data, NSURLRespon
         else if (json) shape = @"JSON scalar";
         else shape = @"Non-JSON body";
     }
-    NSString *detail = [NSString stringWithFormat:@"HTTP: %ld\nTransport: %@ (%ld)\nType: %@\nBytes: %lu\n%@\n\nPlease screenshot this result. No account tokens or response values are shown.",
-        (long)status, error.domain ?: @"No transport error", (long)error.code,
-        response.MIMEType ?: @"none", (unsigned long)data.length, shape];
+    NSString *detail = [NSString stringWithFormat:@"HTTP %ld; %@ %ld; %lu bytes; %@", (long)status, error.domain ?: @"transport OK", (long)error.code, (unsigned long)data.length, shape];
     BOOL product = [request.URL.path containsString:@"/product/"];
-    NSString *category = product ? @"Product" : ([host hasSuffix:@"goodtoucan.com"] ? @"Yuka API" : @"Other service");
+    BOOL api = [host isEqualToString:@"goodtoucan.com"] || [host hasSuffix:@".goodtoucan.com"];
+    if (!api && !product && !error && status < 400) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!RecentResults) RecentResults = [NSMutableArray array];
-        [RecentResults addObject:[NSString stringWithFormat:@"%@: %@", category, detail]];
-        if (RecentResults.count > 4) [RecentResults removeObjectAtIndex:0];
+        if (product) LastProductResult = detail;
+        else if (api) LastAPIResult = detail;
+        else {
+            if (!RecentResults) RecentResults = [NSMutableArray array];
+            [RecentResults addObject:[@"Network failure: " stringByAppendingString:detail]];
+            if (RecentResults.count > 3) [RecentResults removeObjectAtIndex:0];
+        }
         ShowDiagnosticButton();
     });
 }
 static NSURLSessionDataTask *(*OriginalDataCompletion)(id, SEL, NSURLRequest *, Completion);
 static NSURLSessionDataTask *DataCompletion(id self, SEL cmd, NSURLRequest *request, Completion completion) {
     dispatch_async(dispatch_get_main_queue(), ^{ RequestCount++; });
+    ObserveStart(request);
     if (!completion) return OriginalDataCompletion(self, cmd, FinalRequest(request), nil);
     return OriginalDataCompletion(self, cmd, FinalRequest(request), ^(NSData *data, NSURLResponse *response, NSError *error) {
         ReportProductResult(request, data, response, error);
@@ -173,6 +198,7 @@ static NSURLSessionDataTask *DataCompletion(id self, SEL cmd, NSURLRequest *requ
 static NSURLSessionDataTask *(*OriginalData)(id, SEL, NSURLRequest *);
 static NSURLSessionDataTask *Data(id self, SEL cmd, NSURLRequest *request) {
     dispatch_async(dispatch_get_main_queue(), ^{ RequestCount++; });
+    ObserveStart(request);
     return OriginalData(self, cmd, FinalRequest(request));
 }
 static NSURLSessionUploadTask *(*OriginalUpload)(id, SEL, NSURLRequest *, NSData *, Completion);
@@ -205,6 +231,113 @@ static void DelegateComplete(id self, SEL cmd, NSURLSession *session, NSURLSessi
     objc_setAssociatedObject(task, &ResponseDataKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     OriginalDelegateComplete(self, cmd, session, task, error);
 }
+typedef void (^FirebaseCompletion)(id, NSError *);
+static void FirebaseEvent(NSString *operation, id value, NSError *error) {
+    NSString *result;
+    if (error) {
+        NSString *reason = @"";
+        NSString *description = error.localizedDescription.uppercaseString;
+        for (NSString *term in @[@"APP CHECK", @"APPCHECK", @"PERMISSION", @"UNAUTHENTICATED", @"EXPIRED", @"NETWORK", @"DISABLED", @"API KEY", @"ATTEST", @"UNAVAILABLE", @"OFFLINE"]) {
+            if ([description containsString:term]) { reason = term; break; }
+        }
+        result = [NSString stringWithFormat:@"%@: %@ %ld %@", operation, error.domain, (long)error.code, reason];
+    } else result = [NSString stringWithFormat:@"%@: %@", operation, value ? @"success" : @"empty result"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        FirebaseStatus = result;
+        if (!RecentResults) RecentResults = [NSMutableArray array];
+        if (![RecentResults containsObject:result]) [RecentResults addObject:result];
+        if (RecentResults.count > 5) [RecentResults removeObjectAtIndex:0];
+    });
+}
+static void FirebaseStart(NSString *operation) {
+    dispatch_async(dispatch_get_main_queue(), ^{ FirebaseStatus = [operation stringByAppendingString:@": awaiting callback"]; });
+}
+static void (*OriginalToken)(id, SEL, BOOL, FirebaseCompletion);
+static void Token(id self, SEL cmd, BOOL refresh, FirebaseCompletion completion) {
+    if (!completion) { OriginalToken(self, cmd, refresh, nil); return; }
+    FirebaseStart(@"Auth token");
+    OriginalToken(self, cmd, refresh, ^(id result, NSError *error) {
+        FirebaseEvent(@"Auth token", result, error);
+        completion(result, error);
+    });
+}
+static void (*OriginalTokenResult)(id, SEL, BOOL, FirebaseCompletion);
+static void TokenResult(id self, SEL cmd, BOOL refresh, FirebaseCompletion completion) {
+    if (!completion) { OriginalTokenResult(self, cmd, refresh, nil); return; }
+    FirebaseStart(@"Auth token result");
+    OriginalTokenResult(self, cmd, refresh, ^(id result, NSError *error) {
+        FirebaseEvent(@"Auth token result", result, error);
+        completion(result, error);
+    });
+}
+static void (*OriginalDocument)(id, SEL, NSInteger, FirebaseCompletion);
+static void Document(id self, SEL cmd, NSInteger source, FirebaseCompletion completion) {
+    if (!completion) { OriginalDocument(self, cmd, source, nil); return; }
+    FirebaseStart(@"Database document");
+    OriginalDocument(self, cmd, source, ^(id result, NSError *error) {
+        FirebaseEvent(@"Database document", result, error);
+        completion(result, error);
+    });
+}
+static void (*OriginalQuery)(id, SEL, NSInteger, FirebaseCompletion);
+static void Query(id self, SEL cmd, NSInteger source, FirebaseCompletion completion) {
+    if (!completion) { OriginalQuery(self, cmd, source, nil); return; }
+    FirebaseStart(@"Database query");
+    OriginalQuery(self, cmd, source, ^(id result, NSError *error) {
+        FirebaseEvent(@"Database query", result, error);
+        completion(result, error);
+    });
+}
+static id (*OriginalQueryListen)(id, SEL, BOOL, FirebaseCompletion);
+static id QueryListen(id self, SEL cmd, BOOL options, FirebaseCompletion completion) {
+    if (!completion) return OriginalQueryListen(self, cmd, options, nil);
+    FirebaseStart(@"Database listener");
+    return OriginalQueryListen(self, cmd, options, ^(id result, NSError *error) {
+        FirebaseEvent(@"Database listener", result, error);
+        completion(result, error);
+    });
+}
+static id (*OriginalDocumentListen)(id, SEL, BOOL, FirebaseCompletion);
+static id DocumentListen(id self, SEL cmd, BOOL options, FirebaseCompletion completion) {
+    if (!completion) return OriginalDocumentListen(self, cmd, options, nil);
+    FirebaseStart(@"Document listener");
+    return OriginalDocumentListen(self, cmd, options, ^(id result, NSError *error) {
+        FirebaseEvent(@"Document listener", result, error);
+        completion(result, error);
+    });
+}
+static id (*OriginalQueryListenSimple)(id, SEL, FirebaseCompletion);
+static id QueryListenSimple(id self, SEL cmd, FirebaseCompletion completion) {
+    if (!completion) return OriginalQueryListenSimple(self, cmd, nil);
+    FirebaseStart(@"Database listener");
+    return OriginalQueryListenSimple(self, cmd, ^(id result, NSError *error) {
+        FirebaseEvent(@"Database listener", result, error);
+        completion(result, error);
+    });
+}
+static id (*OriginalDocumentListenSimple)(id, SEL, FirebaseCompletion);
+static id DocumentListenSimple(id self, SEL cmd, FirebaseCompletion completion) {
+    if (!completion) return OriginalDocumentListenSimple(self, cmd, nil);
+    FirebaseStart(@"Document listener");
+    return OriginalDocumentListenSimple(self, cmd, ^(id result, NSError *error) {
+        FirebaseEvent(@"Document listener", result, error);
+        completion(result, error);
+    });
+}
+static void InstallFirebaseHooks(void) {
+    Class user = NSClassFromString(@"FIRUser");
+    Class document = NSClassFromString(@"FIRDocumentReference");
+    Class query = NSClassFromString(@"FIRQuery");
+    if (user && !OriginalToken) Hook(user, NSSelectorFromString(@"getIDTokenForcingRefresh:completion:"), (IMP)Token, (IMP *)&OriginalToken);
+    if (user && !OriginalTokenResult) Hook(user, NSSelectorFromString(@"getIDTokenResultForcingRefresh:completion:"), (IMP)TokenResult, (IMP *)&OriginalTokenResult);
+    if (document && !OriginalDocument) Hook(document, NSSelectorFromString(@"getDocumentWithSource:completion:"), (IMP)Document, (IMP *)&OriginalDocument);
+    if (query && !OriginalQuery) Hook(query, NSSelectorFromString(@"getDocumentsWithSource:completion:"), (IMP)Query, (IMP *)&OriginalQuery);
+    if (query && !OriginalQueryListen) Hook(query, NSSelectorFromString(@"addSnapshotListenerWithIncludeMetadataChanges:listener:"), (IMP)QueryListen, (IMP *)&OriginalQueryListen);
+    if (document && !OriginalDocumentListen) Hook(document, NSSelectorFromString(@"addSnapshotListenerWithIncludeMetadataChanges:listener:"), (IMP)DocumentListen, (IMP *)&OriginalDocumentListen);
+    if (query && !OriginalQueryListenSimple) Hook(query, NSSelectorFromString(@"addSnapshotListener:"), (IMP)QueryListenSimple, (IMP *)&OriginalQueryListenSimple);
+    if (document && !OriginalDocumentListenSimple) Hook(document, NSSelectorFromString(@"addSnapshotListener:"), (IMP)DocumentListenSimple, (IMP *)&OriginalDocumentListenSimple);
+    FirebaseHookStatus = [NSString stringWithFormat:@"auth %@, database %@, listener %@", OriginalToken ? @"yes" : @"no", OriginalDocument ? @"yes" : @"no", OriginalQueryListen ? @"yes" : @"no"];
+}
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"yuca.scanner"]) return;
@@ -217,6 +350,7 @@ __attribute__((constructor)) static void Initialize(void) {
         HookFunction hookFunction = (HookFunction)dlsym(substrate ?: RTLD_DEFAULT, "MSHookFunction");
         if (hookFunction) hookFunction((void *)CFBundleGetValueForInfoDictionaryKey, (void *)CFValue, (void **)&OriginalCFValue);
         else NSLog(@"[YukaBypass] CoreFoundation hook unavailable; NSBundle and header hooks remain active.");
+        InstallFirebaseHooks();
         Class delegateClass = NSClassFromString(@"_TtC9Alamofire15SessionDelegate");
         if (delegateClass) {
             Hook(delegateClass, @selector(URLSession:dataTask:didReceiveData:), (IMP)DelegateData, (IMP *)&OriginalDelegateData);
@@ -230,6 +364,7 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
                 (void)timer;
+                InstallFirebaseHooks();
                 Class lateDelegate = NSClassFromString(@"_TtC9Alamofire15SessionDelegate");
                 if (lateDelegate && !OriginalDelegateData) Hook(lateDelegate, @selector(URLSession:dataTask:didReceiveData:), (IMP)DelegateData, (IMP *)&OriginalDelegateData);
                 if (lateDelegate && !OriginalDelegateComplete) Hook(lateDelegate, @selector(URLSession:task:didCompleteWithError:), (IMP)DelegateComplete, (IMP *)&OriginalDelegateComplete);
