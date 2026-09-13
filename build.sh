@@ -5,7 +5,7 @@ mkdir -p build packages
 sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
 xcrun --sdk iphoneos clang -isysroot "$sdk_path" \
  -arch arm64 -arch arm64e -miphoneos-version-min=14.0 \
- -dynamiclib -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -framework Foundation \
+ -dynamiclib -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -framework Foundation -framework UIKit \
  -install_name /Library/MobileSubstrate/DynamicLibraries/YukaBypass.dylib \
  YukaBypass.m -o build/YukaBypass.dylib
 codesign --force --sign - --timestamp=none build/YukaBypass.dylib
