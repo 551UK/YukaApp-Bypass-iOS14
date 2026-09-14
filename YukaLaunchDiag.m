@@ -5,6 +5,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <signal.h>
+#include <limits.h>
+#include <string.h>
+
+static char SignalLogPath[PATH_MAX];
+static BOOL RemoteHookInstalled;
 
 static NSString *LogPath(void) {
     NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -37,6 +43,30 @@ static void LogCaller(NSString *kind, NSInteger code, void *caller) {
     AppendLine([NSString stringWithFormat:@"%@ code=%ld caller=%@+0x%llx", kind, (long)code, image, offset]);
 }
 
+static const char *SignalName(int sig) {
+    switch (sig) {
+        case SIGABRT: return "SIGNAL SIGABRT\n";
+        case SIGTRAP: return "SIGNAL SIGTRAP\n";
+        case SIGILL:  return "SIGNAL SIGILL\n";
+        case SIGSEGV: return "SIGNAL SIGSEGV\n";
+        case SIGBUS:  return "SIGNAL SIGBUS\n";
+        default:      return "SIGNAL UNKNOWN\n";
+    }
+}
+
+static void DiagnosticSignal(int sig) {
+    if (SignalLogPath[0]) {
+        int fd = open(SignalLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            const char *line = SignalName(sig);
+            write(fd, line, strlen(line));
+            close(fd);
+        }
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 static BOOL (*OriginalDidFinish)(id, SEL, UIApplication *, NSDictionary *);
 static BOOL DiagnosticDidFinish(id self, SEL cmd, UIApplication *app, NSDictionary *options) {
     AppendLine(@"AppDelegate didFinishLaunching START");
@@ -50,6 +80,27 @@ static void DiagnosticDidBecomeActive(id self, SEL cmd, UIApplication *app) {
     AppendLine(@"AppDelegate didBecomeActive START");
     OriginalDidBecomeActive(self, cmd, app);
     AppendLine(@"AppDelegate didBecomeActive RETURN");
+}
+
+static void (*OriginalWillResign)(id, SEL, UIApplication *);
+static void DiagnosticWillResign(id self, SEL cmd, UIApplication *app) {
+    AppendLine(@"AppDelegate willResignActive START");
+    OriginalWillResign(self, cmd, app);
+    AppendLine(@"AppDelegate willResignActive RETURN");
+}
+
+static void (*OriginalDidEnterBackground)(id, SEL, UIApplication *);
+static void DiagnosticDidEnterBackground(id self, SEL cmd, UIApplication *app) {
+    AppendLine(@"AppDelegate didEnterBackground START");
+    OriginalDidEnterBackground(self, cmd, app);
+    AppendLine(@"AppDelegate didEnterBackground RETURN");
+}
+
+static void (*OriginalWillTerminateApp)(id, SEL, UIApplication *);
+static void DiagnosticWillTerminateApp(id self, SEL cmd, UIApplication *app) {
+    AppendLine(@"AppDelegate applicationWillTerminate START");
+    OriginalWillTerminateApp(self, cmd, app);
+    AppendLine(@"AppDelegate applicationWillTerminate RETURN");
 }
 
 static id (*OriginalRemoteValue)(id, SEL, NSString *);
@@ -114,12 +165,39 @@ static void InstallFunctionHook(const char *name, void *replacement, void **orig
     if (hook && target) hook(target, replacement, original);
 }
 
+static void TryInstallRemoteHook(void) {
+    if (RemoteHookInstalled) return;
+    Class remoteConfig = NSClassFromString(@"FIRRemoteConfig");
+    if (remoteConfig && class_getInstanceMethod(remoteConfig, @selector(configValueForKey:))) {
+        HookInstance(remoteConfig, @selector(configValueForKey:), (IMP)DiagnosticRemoteValue, (IMP *)&OriginalRemoteValue);
+        RemoteHookInstalled = YES;
+        AppendLine(@"RemoteConfig hook installed");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        TryInstallRemoteHook();
+    });
+}
+
 __attribute__((constructor)) static void InitializeYukaLaunchDiag(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"yuca.scanner"]) return;
         NSString *path = LogPath();
-        if (path) [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-        AppendLine(@"YukaLaunchDiag 2.0.1 constructor loaded");
+        if (path) {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+            const char *fs = path.fileSystemRepresentation;
+            if (fs) {
+                strncpy(SignalLogPath, fs, sizeof(SignalLogPath) - 1);
+                SignalLogPath[sizeof(SignalLogPath) - 1] = '\0';
+            }
+        }
+        AppendLine(@"YukaLaunchDiag 2.0.2 constructor loaded");
+
+        signal(SIGABRT, DiagnosticSignal);
+        signal(SIGTRAP, DiagnosticSignal);
+        signal(SIGILL, DiagnosticSignal);
+        signal(SIGSEGV, DiagnosticSignal);
+        signal(SIGBUS, DiagnosticSignal);
 
         PreviousExceptionHandler = NSGetUncaughtExceptionHandler();
         NSSetUncaughtExceptionHandler(DiagnosticUncaughtException);
@@ -127,9 +205,11 @@ __attribute__((constructor)) static void InitializeYukaLaunchDiag(void) {
         Class appDelegate = NSClassFromString(@"_TtC4Yuka11AppDelegate");
         HookInstance(appDelegate, @selector(application:didFinishLaunchingWithOptions:), (IMP)DiagnosticDidFinish, (IMP *)&OriginalDidFinish);
         HookInstance(appDelegate, @selector(applicationDidBecomeActive:), (IMP)DiagnosticDidBecomeActive, (IMP *)&OriginalDidBecomeActive);
+        HookInstance(appDelegate, @selector(applicationWillResignActive:), (IMP)DiagnosticWillResign, (IMP *)&OriginalWillResign);
+        HookInstance(appDelegate, @selector(applicationDidEnterBackground:), (IMP)DiagnosticDidEnterBackground, (IMP *)&OriginalDidEnterBackground);
+        HookInstance(appDelegate, @selector(applicationWillTerminate:), (IMP)DiagnosticWillTerminateApp, (IMP *)&OriginalWillTerminateApp);
 
-        Class remoteConfig = NSClassFromString(@"FIRRemoteConfig");
-        HookInstance(remoteConfig, @selector(configValueForKey:), (IMP)DiagnosticRemoteValue, (IMP *)&OriginalRemoteValue);
+        TryInstallRemoteHook();
 
         InstallFunctionHook("exit", (void *)&DiagnosticExit, (void **)&OriginalExit);
         InstallFunctionHook("_exit", (void *)&Diagnostic_Exit, (void **)&Original_Exit);

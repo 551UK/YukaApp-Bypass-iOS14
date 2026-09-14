@@ -1,8 +1,8 @@
 Package: com.551uk.yukabypass14
 Name: Yuka Launch Diagnostic iOS 14
-Version: 2.0.1
+Version: 2.0.2
 Architecture: iphoneos-arm
-Description: Diagnostic-only build to find why Yuka 4.38 closes on launch. Does not spoof or change app/network behaviour.
+Description: Diagnostic build for the current Yuka 4.38 launch failure.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
