@@ -1,6 +1,6 @@
 Package: com.551uk.yukabypass14
 Name: Yuka Repair iOS 14
-Version: 2.1.1
+Version: 2.1.2
 Architecture: iphoneos-arm
 Description: Updates expired Firebase configuration and app identity for Yuka 4.38.
 Maintainer: 551UK
