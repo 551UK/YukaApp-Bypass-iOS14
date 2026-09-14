@@ -2,7 +2,7 @@ name: Build and release
 on:
   push:
     branches: [main]
-    paths: ['YukaBypass.m', 'YukaFirebaseConfig.h', 'YukaFirebaseKeyGetter.m', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
+    paths: ['YukaBypass.m', 'YukaFirebaseConfig.h', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write
@@ -22,4 +22,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.8 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.8" --notes "Focused Firestore compatibility test. Keeps the safe 5.3 app/build and request spoof, and adds only a read-only FIROptions APIKey getter override so Firebase/Firestore can see the current Yuka 5.3 client key. It does not restore the setter or storage-bucket hooks that caused the 1.0.5 launch regression. Packaging now derives the .deb filename from the control version. Device testing required."
+          gh release create v1.0.9 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.0.9" --notes "Recovery build after the 1.0.8 launch regression. The experimental helper is no longer compiled; this returns to the launch-stable spoof/request hooks while the next compatibility change is tested separately."

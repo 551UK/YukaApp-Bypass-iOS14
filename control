@@ -1,8 +1,8 @@
 Package: com.551uk.yukabypass14
 Name: Yuka Bypass iOS 14
-Version: 1.0.8
+Version: 1.0.9
 Architecture: iphoneos-arm
-Description: Spoofs Yuka 5.3 and updates its Firebase client key on iOS 14.
+Description: Recovery build using the launch-stable Yuka 5.3 spoof on iOS 14.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
