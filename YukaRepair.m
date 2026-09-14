@@ -169,8 +169,42 @@ static void Document(id self, SEL cmd, DocumentCompletion completion) {
     if (!completion) { OriginalDocument(self, cmd, nil); return; }
     OriginalDocument(self, cmd, ^(id snapshot, NSError *error) {
         Log([NSString stringWithFormat:@"Firestore document: %@/%ld", error.domain ?: @"OK", (long)error.code]);
-        completion(snapshot, error);
+        completion(snapshot, error); Log(@"Firestore document callback AFTER app");
     });
+}
+static void (*OriginalDocumentSource)(id, SEL, NSInteger, DocumentCompletion);
+static void DocumentSource(id self, SEL cmd, NSInteger source, DocumentCompletion completion) {
+    Log([NSString stringWithFormat:@"Firestore document START source=%ld", (long)source]);
+    if (!completion) { OriginalDocumentSource(self, cmd, source, nil); return; }
+    OriginalDocumentSource(self, cmd, source, ^(id snapshot, NSError *error) {
+        Log([NSString stringWithFormat:@"Firestore document callback BEFORE app: %@/%ld", error.domain ?: @"OK", (long)error.code]);
+        completion(snapshot, error);
+        Log(@"Firestore document callback AFTER app");
+    });
+}
+static void (*OriginalQuery)(id, SEL, DocumentCompletion);
+static void Query(id self, SEL cmd, DocumentCompletion completion) {
+    Log(@"Firestore query START");
+    if (!completion) { OriginalQuery(self, cmd, nil); return; }
+    OriginalQuery(self, cmd, ^(id snapshot, NSError *error) {
+        Log([NSString stringWithFormat:@"Firestore query callback BEFORE app: %@/%ld", error.domain ?: @"OK", (long)error.code]);
+        completion(snapshot, error); Log(@"Firestore query callback AFTER app");
+    });
+}
+static id (*OriginalListener)(id, SEL, DocumentCompletion);
+static id Listener(id self, SEL cmd, DocumentCompletion completion) {
+    Log(@"Firestore listener START");
+    if (!completion) return OriginalListener(self, cmd, nil);
+    return OriginalListener(self, cmd, ^(id snapshot, NSError *error) {
+        Log([NSString stringWithFormat:@"Firestore listener callback BEFORE app: %@/%ld", error.domain ?: @"OK", (long)error.code]);
+        completion(snapshot, error); Log(@"Firestore listener callback AFTER app");
+    });
+}
+static id (*OriginalRemoteValue)(id, SEL, NSString *);
+static id RemoteValue(id self, SEL cmd, NSString *key) {
+    // Config key names are useful; fetched values can contain private data.
+    Log([@"Remote Config read: " stringByAppendingString:key ?: @"(nil)"]);
+    return OriginalRemoteValue(self, cmd, key);
 }
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
@@ -184,7 +218,7 @@ __attribute__((constructor)) static void Initialize(void) {
         [fm removeItemAtPath:previous error:NULL];
         if ([fm fileExistsAtPath:LogPath]) [fm moveItemAtPath:LogPath toPath:previous error:NULL];
         ConfigPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"YukaRepair-Firebase.plist"];
-        Log(@"Yuka Repair 2.1.0 loaded");
+        Log(@"Yuka Repair 2.1.1 loaded");
         BOOL dict = Hook(object_getClass(NSClassFromString(@"FIROptions")), NSSelectorFromString(@"defaultOptionsDictionary"), (IMP)DefaultDictionary, (IMP *)&OriginalDefaultDictionary);
         BOOL config = Hook(object_getClass(NSClassFromString(@"FIRApp")), NSSelectorFromString(@"configureWithName:options:"), (IMP)Configure, (IMP *)&OriginalConfigure);
         Log([NSString stringWithFormat:@"Firebase hooks: defaults=%d configure=%d", dict, config]);
@@ -197,6 +231,11 @@ __attribute__((constructor)) static void Initialize(void) {
         Hook(cls, @selector(uploadTaskWithRequest:fromData:completionHandler:), (IMP)Upload, (IMP *)&OriginalUpload);
         [probe invalidateAndCancel];
         Hook(NSClassFromString(@"FIRDocumentReference"), NSSelectorFromString(@"getDocumentWithCompletion:"), (IMP)Document, (IMP *)&OriginalDocument);
+        BOOL docSource = Hook(NSClassFromString(@"FIRDocumentReference"), NSSelectorFromString(@"getDocumentWithSource:completion:"), (IMP)DocumentSource, (IMP *)&OriginalDocumentSource);
+        BOOL query = Hook(NSClassFromString(@"FIRQuery"), NSSelectorFromString(@"getDocumentsWithCompletion:"), (IMP)Query, (IMP *)&OriginalQuery);
+        BOOL listener = Hook(NSClassFromString(@"FIRQuery"), NSSelectorFromString(@"addSnapshotListener:"), (IMP)Listener, (IMP *)&OriginalListener);
+        BOOL remote = Hook(NSClassFromString(@"FIRRemoteConfig"), NSSelectorFromString(@"configValueForKey:"), (IMP)RemoteValue, (IMP *)&OriginalRemoteValue);
+        Log([NSString stringWithFormat:@"Trace hooks: documentSource=%d query=%d listener=%d remote=%d", docSource, query, listener, remote]);
         [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
             (void)note; Log(@"Application active");
         }];
