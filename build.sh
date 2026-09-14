@@ -9,7 +9,7 @@ xcrun --sdk iphoneos clang -isysroot "$sdk_path" \
  -dynamiclib -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -I . \
  -framework Foundation -framework UIKit \
  -install_name /Library/MobileSubstrate/DynamicLibraries/YukaBypass.dylib \
- YukaLaunchDiag.m -o build/YukaBypass.dylib
+ YukaRepair.m -o build/YukaBypass.dylib
 
 codesign --force --sign - --timestamp=none build/YukaBypass.dylib
 codesign --verify --strict build/YukaBypass.dylib

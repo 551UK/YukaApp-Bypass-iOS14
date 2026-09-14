@@ -1,5 +1,7 @@
-# Yuka Bypass iOS 14
+# Yuka Repair iOS 14
 
-Compatibility tweak for Yuka 4.38 on iOS 14.
+Compatibility patch for Yuka 4.38 on rootful iOS 14.
 
-The app itself still launches normally. This project is focused on restoring online features such as product scanning and History after Yuka's backend/Firebase setup changed.
+Updates its expired Firebase client key, storage configuration and app version identity using Yuka 5.3. Device testing is still required.
+
+Install the latest release and respring. Enable tweak injection for Yuka.

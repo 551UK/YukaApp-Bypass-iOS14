@@ -1,8 +1,8 @@
 Package: com.551uk.yukabypass14
-Name: Yuka Launch Diagnostic iOS 14
-Version: 2.0.2
+Name: Yuka Repair iOS 14
+Version: 2.1.0
 Architecture: iphoneos-arm
-Description: Diagnostic build for the current Yuka 4.38 launch failure.
+Description: Updates expired Firebase configuration and app identity for Yuka 4.38.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks

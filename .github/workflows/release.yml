@@ -2,7 +2,7 @@ name: Build and release
 on:
   push:
     branches: [main]
-    paths: ['YukaLaunchDiag.m', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
+    paths: ['YukaRepair.m', 'YukaFirebaseConfig.h', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write
@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Build signed iOS 14 rootful diagnostic
+      - name: Build signed iOS 14 rootful repair
         run: bash build.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -22,4 +22,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v2.0.1 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Launch Diagnostic iOS 14 2.0.1" --notes "Diagnostic-only build. Does not spoof Yuka, iOS, Firebase, Remote Config, or network requests. Logs launch stages, Remote Config keys, Objective-C exceptions, and explicit exit/abort/self-kill calls so the current Yuka 4.38 launch failure can be identified before another compatibility patch is attempted."
+          version=$(sed -n 's/^Version: //p' control)
+          gh release create "v$version" packages/*.deb --target "$GITHUB_SHA" --title "Yuka Repair iOS 14 $version" --notes-file RELEASE_NOTES.md
