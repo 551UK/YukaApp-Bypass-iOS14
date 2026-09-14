@@ -2,7 +2,7 @@ name: Build and release
 on:
   push:
     branches: [main]
-    paths: ['YukaCompat.m', 'YukaFirebaseConfig.h', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
+    paths: ['YukaSpoof.m', 'YukaFirebaseConfig.h', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write
@@ -22,4 +22,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.1.0 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 1.1.0" --notes "Focused Firebase compatibility test. Yuka 4.38 is left reporting its real app version. No FIROptions or storage hooks are used. Firebase reads the original 4.38 GoogleService configuration with only the client API key substituted to the value used by Yuka 5.3. Test History and product scanning."
+          gh release create v2.0.0 packages/*.deb --target "$GITHUB_SHA" --title "Yuka Bypass iOS 14 2.0.0" --notes "Clean restart build. Spoofs Yuka 4.38 as Yuka 5.3 build 2654 and iOS 16.2, applies the exact API compatibility versions recovered from Yuka 5.3 (food 17, cosmetics 4, Algolia 3, OCR 2), updates Yuka request identity, and rewrites the old Firebase client key only on outgoing Google requests. No FIROptions or GoogleService plist hooks are used."
