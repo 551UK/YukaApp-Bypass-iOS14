@@ -5,19 +5,22 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
+#endif
 
-typedef void *(*YukaTLVThunk)(void *);
-typedef struct {
-    YukaTLVThunk thunk;
-    uintptr_t key;
-    uintptr_t offset;
-} YukaTLVDescriptor;
+// Raw addresses of the three gRPC TLS accessors in the exact framework shipped
+// with Yuka 4.38. The assembly wrappers call these after saving the volatile
+// register state that this old grpcpp build incorrectly expects to survive.
+void *YukaTimestampAccessorTarget = NULL;
+void *YukaExecCtxAccessorTarget = NULL;
+void *YukaCallbackExecCtxAccessorTarget = NULL;
+
+extern void *YukaTimestampAccessorCompat(void);
+extern void *YukaExecCtxAccessorCompat(void);
+extern void *YukaCallbackExecCtxAccessorCompat(void);
 
 static NSString *CompatLogPath;
-static YukaTLVDescriptor *TimeSourceDescriptor;
-static YukaTLVDescriptor *GuardDescriptor;
-static YukaTLVThunk OriginalTimeSourceThunk;
-static YukaTLVThunk OriginalGuardThunk;
 static BOOL Installed;
 
 static void CompatLog(NSString *line) {
@@ -64,17 +67,20 @@ static uint32_t Instruction(const struct mach_header_64 *header, uintptr_t offse
     return value;
 }
 
-// The iOS 14 crash occurs because grpcpp keeps its ScopedTimeCache pointer in x10
-// across the Timestamp TLS accessor. The accessor itself calls the Darwin TLV
-// resolver, which is allowed to clobber volatile x10 on this OS. preserve_all makes
-// this tiny shim save x10 (and the other volatile registers) around that resolver.
-__attribute__((preserve_all, noinline))
-static void *PreserveTLVRegisters(void *descriptor) {
-    YukaTLVThunk thunk = NULL;
-    if (descriptor == TimeSourceDescriptor) thunk = OriginalTimeSourceThunk;
-    else if (descriptor == GuardDescriptor) thunk = OriginalGuardThunk;
-    if (!thunk) return NULL;
-    return thunk(descriptor);
+static void *RawFunctionPointer(void *pointer) {
+#if __has_feature(ptrauth_calls)
+    return ptrauth_strip(pointer, ptrauth_key_function_pointer);
+#else
+    return pointer;
+#endif
+}
+
+static BOOL ReplaceLazySlot(void **slot, void *wrapper) {
+    if (!slot || !wrapper) return NO;
+    void *raw = RawFunctionPointer(wrapper);
+    *slot = raw;
+    __sync_synchronize();
+    return *slot == raw;
 }
 
 static void InstallCompatibility(void) {
@@ -83,7 +89,7 @@ static void InstallCompatibility(void) {
     const struct mach_header_64 *grpc = FindImage("/grpc.framework/grpc");
     const struct mach_header_64 *grpcpp = FindImage("/grpcpp.framework/grpcpp");
     if (!grpc || !grpcpp) {
-        CompatLog(@"gRPC images not loaded; compatibility shim not installed");
+        CompatLog(@"gRPC images not loaded; compatibility repair not installed");
         return;
     }
 
@@ -96,39 +102,65 @@ static void InstallCompatibility(void) {
         0xbd, 0xd2, 0xaf, 0x7a, 0x41, 0xa4, 0xbb, 0xd1
     };
 
+    // The supplied crash is grpcpp+0x4984. In this exact constructor x10 is
+    // deliberately kept live across Timestamp's TLS accessor. Other nearby
+    // call sites keep x1/x8 live the same way. That is why protecting only the
+    // Darwin TLV thunk was insufficient: the first lazy bind can clobber the
+    // register before the thunk wrapper even runs.
     BOOL ids = UUIDMatches(grpc, grpcUUID) && UUIDMatches(grpcpp, grpcppUUID);
-    BOOL bytes =
+    BOOL constructorBytes =
         Instruction(grpcpp, 0x495c) == 0xaa0003ea && // mov x10, x0
         Instruction(grpcpp, 0x4960) == 0xf8038d48 && // str x8, [x10,#0x38]!
+        Instruction(grpcpp, 0x4964) == 0x940130d3 && // bl Timestamp TLS stub
+        Instruction(grpcpp, 0x4970) == 0x940130d0 && // bl Timestamp TLS stub again
         Instruction(grpcpp, 0x4974) == 0xf900000a && // str x10, [x0]
-        Instruction(grpcpp, 0x4984) == 0xf9000148 && // str x8, [x10] (faulting instruction)
-        Instruction(grpc, 0x1d5078) == 0xd63f01e0 && // blr x15 (TLS guard resolver)
-        Instruction(grpc, 0x1d5090) == 0xd63f0120;   // blr x9  (TLS value resolver)
+        Instruction(grpcpp, 0x4984) == 0xf9000148;   // str x8, [x10] - crash site
 
-    CompatLog([NSString stringWithFormat:@"target check: build-id=%@ instructions=%@", ids ? @"match" : @"mismatch", bytes ? @"match" : @"mismatch"]);
-    if (!ids || !bytes) {
+    BOOL stubBytes =
+        Instruction(grpcpp, 0x50c98) == 0x90000110 &&
+        Instruction(grpcpp, 0x50c9c) == 0xf9423e10 &&
+        Instruction(grpcpp, 0x50ca0) == 0xd61f0200 && // callback ExecCtx TLS
+        Instruction(grpcpp, 0x50ca4) == 0x90000110 &&
+        Instruction(grpcpp, 0x50ca8) == 0xf9424210 &&
+        Instruction(grpcpp, 0x50cac) == 0xd61f0200 && // ExecCtx TLS
+        Instruction(grpcpp, 0x50cb0) == 0x90000110 &&
+        Instruction(grpcpp, 0x50cb4) == 0xf9424610 &&
+        Instruction(grpcpp, 0x50cb8) == 0xd61f0200;   // Timestamp TLS
+
+    CompatLog([NSString stringWithFormat:@"target check: build-id=%@ constructor=%@ stubs=%@",
+               ids ? @"match" : @"mismatch",
+               constructorBytes ? @"match" : @"mismatch",
+               stubBytes ? @"match" : @"mismatch"]);
+    if (!ids || !constructorBytes || !stubBytes) {
         CompatLog(@"Exact supplied Yuka 4.38 gRPC build not detected; refusing to patch");
         return;
     }
 
-    // Verified from the supplied grpc.framework UUID above. These are the two
-    // consecutive __thread_vars descriptors used by Timestamp's TLS wrapper:
-    // thread_local_time_source_E at 0x37b4c8 and its ___tls_guard at 0x37b4e0.
-    TimeSourceDescriptor = (YukaTLVDescriptor *)((uint8_t *)grpc + 0x37b4c8);
-    GuardDescriptor = (YukaTLVDescriptor *)((uint8_t *)grpc + 0x37b4e0);
-    OriginalTimeSourceThunk = TimeSourceDescriptor->thunk;
-    OriginalGuardThunk = GuardDescriptor->thunk;
+    // Real accessors in grpc.framework, verified against the UUID above.
+    YukaExecCtxAccessorTarget = (void *)((uint8_t *)grpc + 0x0a6324);
+    YukaCallbackExecCtxAccessorTarget = (void *)((uint8_t *)grpc + 0x0a6344);
+    YukaTimestampAccessorTarget = (void *)((uint8_t *)grpc + 0x1d5060);
 
-    if (!OriginalTimeSourceThunk || !OriginalGuardThunk ||
-        OriginalTimeSourceThunk == PreserveTLVRegisters || OriginalGuardThunk == PreserveTLVRegisters) {
-        CompatLog(@"TLS descriptors were not in the expected unpatched state");
+    // grpcpp's three lazy symbol slots. Writing these before the first call
+    // bypasses dyld's first-call binder (which may clobber the live registers)
+    // and sends every TLS access through the full-register assembly wrappers.
+    void **callbackSlot = (void **)((uint8_t *)grpcpp + 0x70478);
+    void **execCtxSlot = (void **)((uint8_t *)grpcpp + 0x70480);
+    void **timestampSlot = (void **)((uint8_t *)grpcpp + 0x70488);
+
+    BOOL callbackOK = ReplaceLazySlot(callbackSlot, (void *)YukaCallbackExecCtxAccessorCompat);
+    BOOL execCtxOK = ReplaceLazySlot(execCtxSlot, (void *)YukaExecCtxAccessorCompat);
+    BOOL timestampOK = ReplaceLazySlot(timestampSlot, (void *)YukaTimestampAccessorCompat);
+
+    CompatLog([NSString stringWithFormat:@"TLS import wrappers: callback=%d execctx=%d timestamp=%d",
+               callbackOK, execCtxOK, timestampOK]);
+    if (!callbackOK || !execCtxOK || !timestampOK) {
+        CompatLog(@"One or more TLS import slots could not be replaced");
         return;
     }
 
-    TimeSourceDescriptor->thunk = PreserveTLVRegisters;
-    GuardDescriptor->thunk = PreserveTLVRegisters;
     Installed = YES;
-    CompatLog(@"Installed register-preserving wrappers for Timestamp TLS accessors");
+    CompatLog(@"Installed full-register gRPC TLS compatibility wrappers");
 }
 
 __attribute__((constructor)) static void InitializeGRPCCompatibility(void) {
@@ -140,7 +172,7 @@ __attribute__((constructor)) static void InitializeGRPCCompatibility(void) {
         NSFileManager *fm = NSFileManager.defaultManager;
         [fm removeItemAtPath:previous error:NULL];
         if ([fm fileExistsAtPath:CompatLogPath]) [fm moveItemAtPath:CompatLogPath toPath:previous error:NULL];
-        CompatLog(@"Yuka gRPC compatibility 2.1.2 loaded");
+        CompatLog(@"Yuka gRPC compatibility 2.1.3 loaded");
         InstallCompatibility();
     }
 }

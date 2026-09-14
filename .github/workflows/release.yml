@@ -2,7 +2,7 @@ name: Build and release
 on:
   push:
     branches: [main]
-    paths: ['YukaRepair.m', 'YukaCrashCapture.m', 'YukaFirebaseConfig.h', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
+    paths: ['YukaRepair.m', 'YukaCrashCapture.m', 'YukaGRPCCompat.m', 'YukaGRPCTLSWrappers.S', 'YukaFirebaseConfig.h', 'build.sh', 'package.py', 'control', '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write

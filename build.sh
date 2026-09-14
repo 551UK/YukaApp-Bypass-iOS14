@@ -10,7 +10,7 @@ xcrun --sdk iphoneos clang -isysroot "$sdk_path" \
  -Wno-incompatible-function-pointer-types -Wno-compare-distinct-pointer-types -I . \
  -framework Foundation -framework UIKit \
  -install_name /Library/MobileSubstrate/DynamicLibraries/YukaBypass.dylib \
- YukaRepair.m YukaCrashCapture.m YukaGRPCCompat.m -o build/YukaBypass.dylib
+ YukaRepair.m YukaCrashCapture.m YukaGRPCCompat.m YukaGRPCTLSWrappers.S -o build/YukaBypass.dylib
 
 codesign --force --sign - --timestamp=none build/YukaBypass.dylib
 codesign --verify --strict build/YukaBypass.dylib

@@ -1,5 +1,5 @@
-Keeps the Firebase configuration repair and adds crash-location capture plus startup callback tracing. This is a diagnostic update; the launch failure is not yet fixed.
+Targets the confirmed `grpcpp+0x4984` iOS 14 crash from Yuka 4.38.
 
-Install, respring, open Yuka online once, then send YukaCrash.txt and YukaRepair.txt from Yuka’s Documents folder. Do not reopen before copying the logs.
+2.1.3 replaces the three gRPC thread-local lazy imports with register-preserving wrappers, including the first-call dyld bind path that 2.1.2 did not cover. Firebase repair remains included.
 
-Captures fatal signals where possible. An iOS kill or an intercepted Mach exception may still require a system crash report.
+Install, respring, then open Yuka online. If it still closes, send `YukaGRPCCompat.txt`, `YukaCrash.txt`, and `YukaRepair.txt` from Yuka's Documents folder.
