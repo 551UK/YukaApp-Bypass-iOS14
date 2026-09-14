@@ -50,16 +50,7 @@ That also covers the first dyld lazy-bind path, which was the part the earlier f
 
 With that fixed, Firestore can initialise normally on iOS 14. Combined with the Firebase/app-identity repair, Yuka 4.38 can once again open online, load history and scan products.
 
-## Target
-
-- **Yuka:** 4.38
-- **Bundle ID:** `yuca.scanner`
-- **iOS:** 14.x
-- **Jailbreak:** rootful
-- **Architectures:** arm64 / arm64e
-
 ## Notes
 
 The gRPC compatibility patch is intentionally build-specific and only activates for the verified Yuka 4.38 framework build.
 
-The release build contains no crash/network diagnostic logging and does not contain any personal Yuka account credentials or session data.
