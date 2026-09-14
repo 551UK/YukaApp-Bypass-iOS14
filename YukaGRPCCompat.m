@@ -3,32 +3,20 @@
 #include <mach-o/loader.h>
 #include <stdint.h>
 #include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
-#if __has_feature(ptrauth_calls)
-#include <ptrauth.h>
-#endif
 
-// Raw addresses of the three gRPC TLS accessors in the exact framework shipped
-// with Yuka 4.38. The assembly wrappers call these after saving the volatile
-// register state that this old grpcpp build incorrectly expects to survive.
-void *YukaTimestampAccessorTarget = NULL;
-void *YukaExecCtxAccessorTarget = NULL;
-void *YukaCallbackExecCtxAccessorTarget = NULL;
+extern void *YukaGRPCWrapTimeSource(void *descriptor);
+extern void *YukaGRPCWrapGuard(void *descriptor);
+extern void *YukaGRPCWrapExecCtx(void *descriptor);
 
-extern void *YukaTimestampAccessorCompat(void);
-extern void *YukaExecCtxAccessorCompat(void);
-extern void *YukaCallbackExecCtxAccessorCompat(void);
+void *YukaGRPCOriginalTimeSource = NULL;
+void *YukaGRPCOriginalGuard = NULL;
+void *YukaGRPCOriginalExecCtx = NULL;
 
-static NSString *CompatLogPath;
-static BOOL Installed;
-
-static void CompatLog(NSString *line) {
-    if (!CompatLogPath || !line) return;
-    NSData *data = [[NSString stringWithFormat:@"%@ %@\n", NSDate.date, line] dataUsingEncoding:NSUTF8StringEncoding];
-    int fd = open(CompatLogPath.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0600);
-    if (fd >= 0) { (void)write(fd, data.bytes, data.length); close(fd); }
-}
+typedef struct {
+    void *thunk;
+    uintptr_t key;
+    uintptr_t offset;
+} YukaTLVDescriptor;
 
 static BOOL PathHasSuffix(const char *path, const char *suffix) {
     if (!path || !suffix) return NO;
@@ -67,31 +55,10 @@ static uint32_t Instruction(const struct mach_header_64 *header, uintptr_t offse
     return value;
 }
 
-static void *RawFunctionPointer(void *pointer) {
-#if __has_feature(ptrauth_calls)
-    return ptrauth_strip(pointer, ptrauth_key_function_pointer);
-#else
-    return pointer;
-#endif
-}
-
-static BOOL ReplaceLazySlot(void **slot, void *wrapper) {
-    if (!slot || !wrapper) return NO;
-    void *raw = RawFunctionPointer(wrapper);
-    *slot = raw;
-    __sync_synchronize();
-    return *slot == raw;
-}
-
 static void InstallCompatibility(void) {
-    if (Installed) return;
-
     const struct mach_header_64 *grpc = FindImage("/grpc.framework/grpc");
     const struct mach_header_64 *grpcpp = FindImage("/grpcpp.framework/grpcpp");
-    if (!grpc || !grpcpp) {
-        CompatLog(@"gRPC images not loaded; compatibility repair not installed");
-        return;
-    }
+    if (!grpc || !grpcpp) return;
 
     static const uint8_t grpcUUID[16] = {
         0xfc, 0xcf, 0xd2, 0xbd, 0x9a, 0x6e, 0x33, 0xa2,
@@ -102,77 +69,33 @@ static void InstallCompatibility(void) {
         0xbd, 0xd2, 0xaf, 0x7a, 0x41, 0xa4, 0xbb, 0xd1
     };
 
-    // The supplied crash is grpcpp+0x4984. In this exact constructor x10 is
-    // deliberately kept live across Timestamp's TLS accessor. Other nearby
-    // call sites keep x1/x8 live the same way. That is why protecting only the
-    // Darwin TLV thunk was insufficient: the first lazy bind can clobber the
-    // register before the thunk wrapper even runs.
     BOOL ids = UUIDMatches(grpc, grpcUUID) && UUIDMatches(grpcpp, grpcppUUID);
-    BOOL constructorBytes =
-        Instruction(grpcpp, 0x495c) == 0xaa0003ea && // mov x10, x0
-        Instruction(grpcpp, 0x4960) == 0xf8038d48 && // str x8, [x10,#0x38]!
-        Instruction(grpcpp, 0x4964) == 0x940130d3 && // bl Timestamp TLS stub
-        Instruction(grpcpp, 0x4970) == 0x940130d0 && // bl Timestamp TLS stub again
-        Instruction(grpcpp, 0x4974) == 0xf900000a && // str x10, [x0]
-        Instruction(grpcpp, 0x4984) == 0xf9000148;   // str x8, [x10] - crash site
+    BOOL bytes =
+        Instruction(grpcpp, 0x495c) == 0xaa0003ea &&
+        Instruction(grpcpp, 0x4960) == 0xf8038d48 &&
+        Instruction(grpcpp, 0x4974) == 0xf900000a &&
+        Instruction(grpcpp, 0x4984) == 0xf9000148 &&
+        Instruction(grpc, 0x1d5078) == 0xd63f01e0 &&
+        Instruction(grpc, 0x1d5090) == 0xd63f0120;
 
-    BOOL stubBytes =
-        Instruction(grpcpp, 0x50c98) == 0x90000110 &&
-        Instruction(grpcpp, 0x50c9c) == 0xf9423e10 &&
-        Instruction(grpcpp, 0x50ca0) == 0xd61f0200 && // callback ExecCtx TLS
-        Instruction(grpcpp, 0x50ca4) == 0x90000110 &&
-        Instruction(grpcpp, 0x50ca8) == 0xf9424210 &&
-        Instruction(grpcpp, 0x50cac) == 0xd61f0200 && // ExecCtx TLS
-        Instruction(grpcpp, 0x50cb0) == 0x90000110 &&
-        Instruction(grpcpp, 0x50cb4) == 0xf9424610 &&
-        Instruction(grpcpp, 0x50cb8) == 0xd61f0200;   // Timestamp TLS
+    if (!ids || !bytes) return;
 
-    CompatLog([NSString stringWithFormat:@"target check: build-id=%@ constructor=%@ stubs=%@",
-               ids ? @"match" : @"mismatch",
-               constructorBytes ? @"match" : @"mismatch",
-               stubBytes ? @"match" : @"mismatch"]);
-    if (!ids || !constructorBytes || !stubBytes) {
-        CompatLog(@"Exact supplied Yuka 4.38 gRPC build not detected; refusing to patch");
-        return;
-    }
+    YukaTLVDescriptor *timeSource = (YukaTLVDescriptor *)((uint8_t *)grpc + 0x37b4c8);
+    YukaTLVDescriptor *guard = (YukaTLVDescriptor *)((uint8_t *)grpc + 0x37b4e0);
 
-    // Real accessors in grpc.framework, verified against the UUID above.
-    YukaExecCtxAccessorTarget = (void *)((uint8_t *)grpc + 0x0a6324);
-    YukaCallbackExecCtxAccessorTarget = (void *)((uint8_t *)grpc + 0x0a6344);
-    YukaTimestampAccessorTarget = (void *)((uint8_t *)grpc + 0x1d5060);
+    if (!timeSource->thunk || !guard->thunk) return;
 
-    // grpcpp's three lazy symbol slots. Writing these before the first call
-    // bypasses dyld's first-call binder (which may clobber the live registers)
-    // and sends every TLS access through the full-register assembly wrappers.
-    void **callbackSlot = (void **)((uint8_t *)grpcpp + 0x70478);
-    void **execCtxSlot = (void **)((uint8_t *)grpcpp + 0x70480);
-    void **timestampSlot = (void **)((uint8_t *)grpcpp + 0x70488);
+    YukaGRPCOriginalTimeSource = timeSource->thunk;
+    YukaGRPCOriginalGuard = guard->thunk;
+    YukaGRPCOriginalExecCtx = guard->thunk;
 
-    BOOL callbackOK = ReplaceLazySlot(callbackSlot, (void *)YukaCallbackExecCtxAccessorCompat);
-    BOOL execCtxOK = ReplaceLazySlot(execCtxSlot, (void *)YukaExecCtxAccessorCompat);
-    BOOL timestampOK = ReplaceLazySlot(timestampSlot, (void *)YukaTimestampAccessorCompat);
-
-    CompatLog([NSString stringWithFormat:@"TLS import wrappers: callback=%d execctx=%d timestamp=%d",
-               callbackOK, execCtxOK, timestampOK]);
-    if (!callbackOK || !execCtxOK || !timestampOK) {
-        CompatLog(@"One or more TLS import slots could not be replaced");
-        return;
-    }
-
-    Installed = YES;
-    CompatLog(@"Installed full-register gRPC TLS compatibility wrappers");
+    timeSource->thunk = (void *)YukaGRPCWrapTimeSource;
+    guard->thunk = (void *)YukaGRPCWrapGuard;
 }
 
 __attribute__((constructor)) static void InitializeGRPCCompatibility(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"yuca.scanner"]) return;
-        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        CompatLogPath = [docs stringByAppendingPathComponent:@"YukaGRPCCompat.txt"];
-        NSString *previous = [docs stringByAppendingPathComponent:@"YukaGRPCCompat-previous.txt"];
-        NSFileManager *fm = NSFileManager.defaultManager;
-        [fm removeItemAtPath:previous error:NULL];
-        if ([fm fileExistsAtPath:CompatLogPath]) [fm moveItemAtPath:CompatLogPath toPath:previous error:NULL];
-        CompatLog(@"Yuka gRPC compatibility 2.1.3 loaded");
         InstallCompatibility();
     }
 }
