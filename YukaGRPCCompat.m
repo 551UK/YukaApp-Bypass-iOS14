@@ -3,20 +3,20 @@
 #include <mach-o/loader.h>
 #include <stdint.h>
 #include <string.h>
+#if __has_feature(ptrauth_calls)
+#include <ptrauth.h>
+#endif
 
-extern void *YukaGRPCWrapTimeSource(void *descriptor);
-extern void *YukaGRPCWrapGuard(void *descriptor);
-extern void *YukaGRPCWrapExecCtx(void *descriptor);
+void *YukaTimestampAccessorTarget = NULL;
+void *YukaExecCtxAccessorTarget = NULL;
+void *YukaCallbackExecCtxAccessorTarget = NULL;
 
-void *YukaGRPCOriginalTimeSource = NULL;
-void *YukaGRPCOriginalGuard = NULL;
-void *YukaGRPCOriginalExecCtx = NULL;
+extern void *YukaTimestampAccessorCompat(void);
+extern void *YukaExecCtxAccessorCompat(void);
+extern void *YukaCallbackExecCtxAccessorCompat(void);
 
-typedef struct {
-    void *thunk;
-    uintptr_t key;
-    uintptr_t offset;
-} YukaTLVDescriptor;
+static BOOL Installed;
+static void CompatLog(NSString *line) { (void)line; }
 
 static BOOL PathHasSuffix(const char *path, const char *suffix) {
     if (!path || !suffix) return NO;
@@ -55,10 +55,31 @@ static uint32_t Instruction(const struct mach_header_64 *header, uintptr_t offse
     return value;
 }
 
+static void *RawFunctionPointer(void *pointer) {
+#if __has_feature(ptrauth_calls)
+    return ptrauth_strip(pointer, ptrauth_key_function_pointer);
+#else
+    return pointer;
+#endif
+}
+
+static BOOL ReplaceLazySlot(void **slot, void *wrapper) {
+    if (!slot || !wrapper) return NO;
+    void *raw = RawFunctionPointer(wrapper);
+    *slot = raw;
+    __sync_synchronize();
+    return *slot == raw;
+}
+
 static void InstallCompatibility(void) {
+    if (Installed) return;
+
     const struct mach_header_64 *grpc = FindImage("/grpc.framework/grpc");
     const struct mach_header_64 *grpcpp = FindImage("/grpcpp.framework/grpcpp");
-    if (!grpc || !grpcpp) return;
+    if (!grpc || !grpcpp) {
+        CompatLog(@"gRPC images not loaded");
+        return;
+    }
 
     static const uint8_t grpcUUID[16] = {
         0xfc, 0xcf, 0xd2, 0xbd, 0x9a, 0x6e, 0x33, 0xa2,
@@ -70,27 +91,41 @@ static void InstallCompatibility(void) {
     };
 
     BOOL ids = UUIDMatches(grpc, grpcUUID) && UUIDMatches(grpcpp, grpcppUUID);
-    BOOL bytes =
+    BOOL constructorBytes =
         Instruction(grpcpp, 0x495c) == 0xaa0003ea &&
         Instruction(grpcpp, 0x4960) == 0xf8038d48 &&
+        Instruction(grpcpp, 0x4964) == 0x940130d3 &&
+        Instruction(grpcpp, 0x4970) == 0x940130d0 &&
         Instruction(grpcpp, 0x4974) == 0xf900000a &&
-        Instruction(grpcpp, 0x4984) == 0xf9000148 &&
-        Instruction(grpc, 0x1d5078) == 0xd63f01e0 &&
-        Instruction(grpc, 0x1d5090) == 0xd63f0120;
+        Instruction(grpcpp, 0x4984) == 0xf9000148;
 
-    if (!ids || !bytes) return;
+    BOOL stubBytes =
+        Instruction(grpcpp, 0x50c98) == 0x90000110 &&
+        Instruction(grpcpp, 0x50c9c) == 0xf9423e10 &&
+        Instruction(grpcpp, 0x50ca0) == 0xd61f0200 &&
+        Instruction(grpcpp, 0x50ca4) == 0x90000110 &&
+        Instruction(grpcpp, 0x50ca8) == 0xf9424210 &&
+        Instruction(grpcpp, 0x50cac) == 0xd61f0200 &&
+        Instruction(grpcpp, 0x50cb0) == 0x90000110 &&
+        Instruction(grpcpp, 0x50cb4) == 0xf9424610 &&
+        Instruction(grpcpp, 0x50cb8) == 0xd61f0200;
 
-    YukaTLVDescriptor *timeSource = (YukaTLVDescriptor *)((uint8_t *)grpc + 0x37b4c8);
-    YukaTLVDescriptor *guard = (YukaTLVDescriptor *)((uint8_t *)grpc + 0x37b4e0);
+    if (!ids || !constructorBytes || !stubBytes) return;
 
-    if (!timeSource->thunk || !guard->thunk) return;
+    YukaExecCtxAccessorTarget = (void *)((uint8_t *)grpc + 0x0a6324);
+    YukaCallbackExecCtxAccessorTarget = (void *)((uint8_t *)grpc + 0x0a6344);
+    YukaTimestampAccessorTarget = (void *)((uint8_t *)grpc + 0x1d5060);
 
-    YukaGRPCOriginalTimeSource = timeSource->thunk;
-    YukaGRPCOriginalGuard = guard->thunk;
-    YukaGRPCOriginalExecCtx = guard->thunk;
+    void **callbackSlot = (void **)((uint8_t *)grpcpp + 0x70478);
+    void **execCtxSlot = (void **)((uint8_t *)grpcpp + 0x70480);
+    void **timestampSlot = (void **)((uint8_t *)grpcpp + 0x70488);
 
-    timeSource->thunk = (void *)YukaGRPCWrapTimeSource;
-    guard->thunk = (void *)YukaGRPCWrapGuard;
+    BOOL callbackOK = ReplaceLazySlot(callbackSlot, (void *)YukaCallbackExecCtxAccessorCompat);
+    BOOL execCtxOK = ReplaceLazySlot(execCtxSlot, (void *)YukaExecCtxAccessorCompat);
+    BOOL timestampOK = ReplaceLazySlot(timestampSlot, (void *)YukaTimestampAccessorCompat);
+
+    if (!callbackOK || !execCtxOK || !timestampOK) return;
+    Installed = YES;
 }
 
 __attribute__((constructor)) static void InitializeGRPCCompatibility(void) {
