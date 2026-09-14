@@ -1,39 +1,65 @@
 # Yuka App Bypass iOS 14
 
-Rootful tweak for **Yuka 4.38** on **iOS 14**.
+Rootful tweak for **Yuka 4.38 on iOS 14**. It restores the app's online functions, including startup, history, product lookup and barcode scanning.
 
-It restores Yuka's online functionality, including startup, history, product lookup and barcode scanning.
+## What was broken
 
-## What was actually broken
+There were two separate problems.
 
-Yuka 4.38 still contains an older Firebase / Firestore stack and an older gRPC build. Two separate compatibility problems appeared when the app contacted the current backend from iOS 14.
+### 1. Old Firebase / app identity
 
-First, Yuka's bundled Firebase configuration had become stale. The app was still using an old Firebase API key and the old storage bucket value. The tweak repairs those values before Firebase finishes configuring, while keeping the rest of Yuka's original configuration intact. It also presents the current Yuka app version/build identity to the app and network requests where the backend expects it.
+Yuka 4.38 ships with older Firebase configuration and identifies itself as an outdated app build. The current backend no longer accepts all of that old information.
 
-The harder crash was lower-level and was not a normal version check. Once Firestore started networking, Yuka crashed inside its bundled `grpcpp` framework at `grpcpp + 0x4984` in the `grpc_core::ExecCtx` path. The instruction was writing through a pointer held in ARM64 register `x10`.
+The tweak repairs Yuka's Firebase configuration before Firebase finishes starting, replaces the outdated Firebase API key and storage bucket with the values used by the newer app, and presents the current Yuka app identity where the backend expects it.
 
-The old gRPC code assumes several volatile ARM64 registers survive its thread-local-storage accessors. On iOS 14, the Darwin TLS / lazy-binding path is allowed to clobber those volatile registers. On the first TLS access, the call can also pass through dyld's lazy symbol binder before reaching the real TLS resolver. That meant the pointer in `x10` could already be destroyed by the time gRPC returned to the instruction that uses it, causing a repeatable `SIGSEGV` at the same `grpcpp + 0x4984` address.
+Only network/app metadata is spoofed. iOS itself is still reported truthfully to runtime availability checks so Yuka does not try to call newer iOS APIs that do not exist on iOS 14.
 
-The first compatibility attempt only wrapped the inner TLS resolver. That was not enough because the register could be clobbered earlier by the lazy-binding path.
+### 2. Old gRPC crashes on iOS 14
 
-## The final fix
+This was the main problem.
 
-The working fix targets the exact `grpc` and `grpcpp` builds shipped inside the supplied Yuka 4.38 IPA.
+Once Firestore started networking, Yuka repeatedly crashed inside its bundled `grpcpp` framework at:
 
-Before patching anything, the tweak verifies the framework UUIDs and the expected ARM64 instruction bytes. If they do not match the known Yuka 4.38 build, it refuses to patch unknown code.
+`grpcpp + 0x4984`
 
-For the matching build, the tweak replaces the affected gRPC thread-local lazy-import slots with small ARM64 assembly wrappers. These wrappers preserve the volatile register state across the complete TLS accessor path, including the first-call dyld lazy bind, then call the original target and restore the saved registers before returning to gRPC.
+The crashing code was using a pointer kept in ARM64 register `x10` across one of gRPC's thread-local-storage (TLS) accessors.
 
-That prevents `x10` and the other live volatile registers from being destroyed while old gRPC expects them to remain valid. With that compatibility shim in place, Firestore can initialise normally on iOS 14 and Yuka stays open, loads history and scans products again.
+The old gRPC build bundled with Yuka assumes several volatile ARM64 registers stay intact across these TLS calls. On iOS 14 that assumption is unsafe: Darwin's TLS resolver, and especially the first-call dyld lazy-binding path, are allowed to overwrite those volatile registers.
+
+So `x10` could contain a valid pointer before the TLS call, be clobbered during lazy binding/TLS resolution, then be used immediately afterwards. That produced the repeatable `SIGSEGV` at `grpcpp + 0x4984`.
+
+An earlier attempt protected only the inner TLS resolver. It still crashed because the register could already be destroyed by dyld's lazy binder before that wrapper was reached.
+
+## The working fix
+
+The final fix intercepts the problem one level earlier.
+
+The tweak first verifies that the loaded `grpc` and `grpcpp` frameworks are the exact builds from Yuka 4.38 by checking their UUIDs and known ARM64 instruction bytes. If they do not match, the gRPC patch is not applied.
+
+For the matching build, it replaces the three affected gRPC TLS lazy-import slots:
+
+- Timestamp TLS accessor
+- ExecCtx TLS accessor
+- Callback ExecCtx TLS accessor
+
+Those imports are redirected to small ARM64 assembly wrappers before their first normal call. The wrappers save the volatile register state, call the real gRPC TLS accessor, then restore the saved state before returning to `grpcpp`.
+
+The wrappers preserve `x1-x17`, `x30` and `q0-q31`; `x0` is left as the accessor return value.
+
+That also covers the first dyld lazy-bind path, which was the part the earlier fix missed. The pointer in `x10` and the other live volatile values therefore survive exactly as the old gRPC code expects.
+
+With that fixed, Firestore can initialise normally on iOS 14. Combined with the Firebase/app-identity repair, Yuka 4.38 can once again open online, load history and scan products.
 
 ## Target
 
-- Yuka: **4.38**
-- Bundle ID: `yuca.scanner`
-- iOS: **14.x**
-- Jailbreak packaging: **rootful**
-- Architecture: **arm64 / arm64e**
+- **Yuka:** 4.38
+- **Bundle ID:** `yuca.scanner`
+- **iOS:** 14.x
+- **Jailbreak:** rootful
+- **Architectures:** arm64 / arm64e
 
 ## Notes
 
-This is intentionally build-specific. The gRPC compatibility patch only activates for the exact framework build it was made for rather than blindly modifying other versions of Yuka.
+The gRPC compatibility patch is intentionally build-specific and only activates for the verified Yuka 4.38 framework build.
+
+The release build contains no crash/network diagnostic logging and does not contain any personal Yuka account credentials or session data.
