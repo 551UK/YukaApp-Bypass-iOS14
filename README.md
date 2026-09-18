@@ -59,6 +59,12 @@ Yuka 5.3 contains a custom email-entry implementation with retry handling around
 
 The existing Firebase repair, app-identity spoof and gRPC TLS compatibility patch are unchanged.
 
+### 4. Email sign-up missing
+
+Yuka 4.38 still bundles FirebaseUI's password sign-up controller, but its email provider can be configured as sign-in-only through `allowNewEmailAccounts`. Version 2.1.7 overrides only that FirebaseUI getter so new email addresses can follow Yuka's existing sign-up flow.
+
+The 2.1.6 email sign-in retry/fallback is unchanged, as are the Firebase, app-identity and gRPC fixes.
+
 ## Notes
 
 The gRPC compatibility patch is intentionally build-specific and only activates for the verified Yuka 4.38 framework build.

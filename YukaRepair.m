@@ -192,6 +192,17 @@ static void FetchSignInMethods(id self, SEL cmd, NSString *email,
     FetchSignInMethodsAttempt(self, cmd, email, completion, 0);
 }
 
+// Yuka 4.38 already contains its normal password sign-up controller. Keep the
+// working 2.1.6 sign-in compatibility path unchanged and only re-enable the
+// FirebaseUI switch that permits new email accounts.
+static BOOL (*OriginalAllowNewEmailAccounts)(id, SEL);
+
+static BOOL AllowNewEmailAccounts(id self, SEL cmd) {
+    (void)self;
+    (void)cmd;
+    return YES;
+}
+
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
         MainBundle = NSBundle.mainBundle;
@@ -202,6 +213,10 @@ __attribute__((constructor)) static void Initialize(void) {
         Hook(NSClassFromString(@"FIRAuth"),
              NSSelectorFromString(@"fetchSignInMethodsForEmail:completion:"),
              (IMP)FetchSignInMethods, (IMP *)&OriginalFetchSignInMethods);
+
+        Hook(NSClassFromString(@"FUIEmailAuth"),
+             NSSelectorFromString(@"allowNewEmailAccounts"),
+             (IMP)AllowNewEmailAccounts, (IMP *)&OriginalAllowNewEmailAccounts);
 
         Hook(object_getClass(NSClassFromString(@"FIROptions")),
              NSSelectorFromString(@"defaultOptionsDictionary"),

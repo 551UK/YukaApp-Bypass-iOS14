@@ -1,5 +1,5 @@
-Fixes fresh email login on Yuka 4.38.
+Restores email account sign-up on Yuka 4.38.
 
-The legacy FirebaseUI email screen could dismiss back to the "Let's go" screen when its sign-in-method lookup failed. This build adds retry/fallback handling so the user can continue to the password screen instead of being kicked back.
+Version 2.1.7 keeps the working 2.1.6 sign-in retry/fallback unchanged. It only re-enables the legacy FirebaseUI `allowNewEmailAccounts` path so an email with no existing account can continue into Yuka's already-bundled password sign-up controller.
 
-The working Firebase, scanning/history and iOS 14 gRPC TLS fixes are unchanged.
+The Firebase repair, app-identity spoof, scanning/history support and iOS 14 gRPC TLS compatibility fix are unchanged.
