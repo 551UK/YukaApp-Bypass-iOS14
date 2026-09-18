@@ -50,6 +50,15 @@ That also covers the first dyld lazy-bind path, which was the part the earlier f
 
 With that fixed, Firestore can initialise normally on iOS 14. Combined with the Firebase/app-identity repair, Yuka 4.38 can once again open online, load history and scan products.
 
+
+### 3. Fresh email login returning to "Let's go"
+
+Yuka 4.38 uses the older FirebaseUI email-entry flow. Before showing the password screen it calls `fetchSignInMethodsForEmail`. On the current backend that lookup can fail or return no result, and the old FirebaseUI controller treats the failure as fatal and dismisses the whole login flow.
+
+Yuka 5.3 contains a custom email-entry implementation with retry handling around the same lookup. Version 2.1.6 backports that compatibility behavior into the tweak: the old lookup is retried, including the nil-without-error case, and if it still cannot complete the flow falls back to the normal password provider instead of returning to the `Let's go` screen.
+
+The existing Firebase repair, app-identity spoof and gRPC TLS compatibility patch are unchanged.
+
 ## Notes
 
 The gRPC compatibility patch is intentionally build-specific and only activates for the verified Yuka 4.38 framework build.

@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "YukaFirebaseConfig.h"
@@ -155,12 +156,52 @@ static id Upload(id self, SEL cmd, NSURLRequest *request, NSData *body, Completi
     return OriginalUpload(self, cmd, RepairRequest(request), body, completion);
 }
 
+
+typedef void (^SignInMethodsCompletion)(NSArray *, NSError *);
+
+static void (*OriginalFetchSignInMethods)(id, SEL, NSString *, SignInMethodsCompletion);
+
+static void FetchSignInMethodsAttempt(id self, SEL cmd, NSString *email,
+                                      SignInMethodsCompletion completion,
+                                      NSUInteger attempt) {
+    OriginalFetchSignInMethods(self, cmd, email, ^(NSArray *providers, NSError *error) {
+        // Yuka 5.3 added retry handling around this lookup. The old FirebaseUI
+        // controller in 4.38 dismisses the auth flow when the lookup errors,
+        // returning the user to the "Let's go" screen.
+        if (!error && providers != nil) {
+            if (completion) completion(providers, nil);
+            return;
+        }
+
+        if (attempt < 2) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(150 * NSEC_PER_MSEC)),
+                           dispatch_get_main_queue(), ^{
+                FetchSignInMethodsAttempt(self, cmd, email, completion, attempt + 1);
+            });
+            return;
+        }
+
+        // If provider discovery still cannot complete, continue through the
+        // normal password sign-in path instead of dismissing the login UI.
+        if (completion) completion(@[@"password"], nil);
+    });
+}
+
+static void FetchSignInMethods(id self, SEL cmd, NSString *email,
+                               SignInMethodsCompletion completion) {
+    FetchSignInMethodsAttempt(self, cmd, email, completion, 0);
+}
+
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
         MainBundle = NSBundle.mainBundle;
         if (![MainBundle.bundleIdentifier isEqual:@"yuca.scanner"]) return;
 
         ConfigPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"YukaRepair-Firebase.plist"];
+
+        Hook(NSClassFromString(@"FIRAuth"),
+             NSSelectorFromString(@"fetchSignInMethodsForEmail:completion:"),
+             (IMP)FetchSignInMethods, (IMP *)&OriginalFetchSignInMethods);
 
         Hook(object_getClass(NSClassFromString(@"FIROptions")),
              NSSelectorFromString(@"defaultOptionsDictionary"),
