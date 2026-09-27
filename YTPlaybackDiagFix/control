@@ -1,0 +1,9 @@
+Package: com.551uk.ytplaybackdiagfix
+Name: YouTube Playback Diag Fix
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Rootful iOS 12-14 YouTube playback diagnostics with conservative stall recovery.
+Maintainer: 551UK
+Author: 551UK
+Section: Tweaks
+Depends: mobilesubstrate
