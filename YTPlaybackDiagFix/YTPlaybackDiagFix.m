@@ -3,16 +3,20 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static NSString * const YTLogPath = @"/var/mobile/Library/Logs/YTPlaybackDiag.log";
+static NSString *YTLogPath(void) {
+    NSString *home = NSHomeDirectory();
+    NSString *docs = [home stringByAppendingPathComponent:@"Documents"];
+    return [docs stringByAppendingPathComponent:@"YTPlaybackDiag.log"];
+}
 static NSMapTable<AVPlayerItem *, AVPlayer *> *YTPlayerByItem;
 static NSMapTable<AVPlayerItem *, NSNumber *> *YTLastRecoveryByItem;
 static NSMutableSet<NSString *> *YTHookedMethods;
 
 static void YTEnsureLogFile(void) {
-    NSString *dir = [YTLogPath stringByDeletingLastPathComponent];
+    NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath]) {
-        [@"YouTube Playback Diag Fix v0.1.0\n" writeToFile:YTLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
+        [@"YouTube Playback Diag Fix v0.1.1\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -31,7 +35,7 @@ static void YTLog(NSString *format, ...) {
     NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [df stringFromDate:[NSDate date]], msg ?: @""];
     @synchronized ([NSFileManager class]) {
         YTEnsureLogFile();
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:YTLogPath];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:YTLogPath()];
         if (fh) {
             [fh seekToEndOfFile];
             [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
@@ -279,6 +283,6 @@ __attribute__((constructor)) static void YTInit(void) {
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.1.0 | YouTube %@ (%@) | iOS %@ | model %@ =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.1.1 | YouTube %@ (%@) | iOS %@ | model %@ =====",ver,build,d.systemVersion,d.model);
     }
 }
