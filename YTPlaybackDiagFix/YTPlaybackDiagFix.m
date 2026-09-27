@@ -176,6 +176,8 @@ static void YTInstallLowLevelHooks(void) {
 }
 
 
+static BOOL YTFallbackPlaybackMode = NO;
+
 static BOOL YTPlaybackPath(NSString *path) {
     NSString *p = path.lowercaseString ?: @"";
     return [p containsString:@"/player"] ||
@@ -248,7 +250,6 @@ static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
 // ---- YouTube playback recovery ----
 static IMP YTOldHandleError = NULL;
 static BOOL YTHandleErrorInstalled = NO;
-static BOOL YTFallbackPlaybackMode = NO;
 static NSTimeInterval YTRetryWindowStart = 0;
 static NSInteger YTRetryCount = 0;
 
