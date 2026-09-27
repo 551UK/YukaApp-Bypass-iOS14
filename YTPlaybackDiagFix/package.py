@@ -1,0 +1,30 @@
+import io, pathlib, plistlib, tarfile
+root = pathlib.Path(__file__).resolve().parent
+def archive(files):
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode='w:gz', format=tarfile.USTAR_FORMAT) as tar:
+        for name, data, mode in files:
+            item = tarfile.TarInfo(name)
+            item.size=len(data); item.mode=mode
+            item.uid=item.gid=0; item.uname=item.gname='root'
+            tar.addfile(item, io.BytesIO(data))
+    return out.getvalue()
+control_bytes=(root/'control').read_bytes()
+control_text=control_bytes.decode('utf-8')
+version=next(line.split(':',1)[1].strip() for line in control_text.splitlines() if line.startswith('Version:'))
+control=archive([('./control',control_bytes,0o644)])
+prefix='./Library/MobileSubstrate/DynamicLibraries/'
+plist=plistlib.dumps({'Filter': {'Bundles': ['com.google.ios.youtube']}})
+data=archive([
+    (prefix+'YTPlaybackDiagFix.dylib',(root/'build/YTPlaybackDiagFix.dylib').read_bytes(),0o755),
+    (prefix+'YTPlaybackDiagFix.plist',plist,0o644),
+])
+package=root/f'packages/com.551uk.ytplaybackdiagfix_{version}_iphoneos-arm.deb'
+with package.open('wb') as out:
+    out.write(b'!<arch>\n')
+    for name,content in [('debian-binary',b'2.0\n'),('control.tar.gz',control),('data.tar.gz',data)]:
+        header=f'{name+"/":<16}{0:<12}{0:<6}{0:<6}{"100644":<8}{len(content):<10}`\n'
+        assert len(header)==60
+        out.write(header.encode('ascii')); out.write(content)
+        if len(content)%2: out.write(b'\n')
+print(package)
