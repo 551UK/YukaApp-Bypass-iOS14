@@ -2,6 +2,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dlfcn.h>
 #import <netdb.h>
 #import <string.h>
@@ -19,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.1.2\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.1.3\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -132,7 +133,12 @@ static id YTNSErrorFactory(id self, SEL _cmd, NSString *domain, NSInteger code, 
     if (!YTInsideNSErrorHook && YTSuspiciousErrorDomain(domain)) {
         YTInsideNSErrorHook = YES;
         NSString *desc = [userInfo[NSLocalizedDescriptionKey] description] ?: [err localizedDescription] ?: @"";
-        YTLog(@"NSERROR !!! domain=%@ code=%ld desc=%@ keys=%@", domain ?: @"", (long)code, desc, userInfo.allKeys ?: @[]);
+        id ham=userInfo[@"HAMErrorDetails"];
+        id qoe=userInfo[@"YTMediaErrorQOEErrorCodeKey"];
+        NSString *extra=@"";
+        if (ham) extra=[extra stringByAppendingFormat:@" HAMErrorDetails=%@",YTRedactText([ham description])];
+        if (qoe) extra=[extra stringByAppendingFormat:@" QOE=%@",YTRedactText([qoe description])];
+        YTLog(@"NSERROR !!! domain=%@ code=%ld desc=%@ keys=%@%@", domain ?: @"", (long)code, desc, userInfo.allKeys ?: @[], extra);
         YTInsideNSErrorHook = NO;
     }
     return err;
@@ -167,6 +173,210 @@ static void YTInstallLowLevelHooks(void) {
     if (!hook) { YTLog(@"LOWLEVEL MSHookFunction unavailable"); return; }
     hook((void *)getaddrinfo, (void *)YTGetAddrInfo, (void **)&YTOldGetAddrInfo);
     YTLog(@"LOWLEVEL DNS hook installed");
+}
+
+
+static BOOL YTPlaybackPath(NSString *path) {
+    NSString *p = path.lowercaseString ?: @"";
+    return [p containsString:@"/player"] ||
+           [p containsString:@"/initplayback"] ||
+           [p containsString:@"/videoplayback"];
+}
+
+static NSString *YTReplaceQueryValue(NSString *urlString, NSString *key, NSString *value) {
+    if (!urlString.length || !key.length) return urlString;
+    NSString *pattern = [NSString stringWithFormat:@"([?&])%@=[^&]+", [NSRegularExpression escapedPatternForString:key]];
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+    if (!re) return urlString;
+    NSString *templ = [NSString stringWithFormat:@"$1%@=%@", key, value ?: @""];
+    return [re stringByReplacingMatchesInString:urlString options:0 range:NSMakeRange(0,urlString.length) withTemplate:templ];
+}
+
+static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
+    if (!request.URL) return;
+    NSString *path = request.URL.path.lowercaseString ?: @"";
+    if (!YTPlaybackPath(path)) return;
+
+    [request setValue:@"75" forHTTPHeaderField:@"X-YouTube-Client-Name"];
+    [request setValue:@"1.1" forHTTPHeaderField:@"X-YouTube-Client-Version"];
+    [request setValue:@"Mozilla/5.0 (PS4; Leanback Shell) Gecko/20100101 Firefox/65.0 LeanbackShell/01.00.01.75 Sony PS4/ (PS4, , no, CH)"
+   forHTTPHeaderField:@"User-Agent"];
+    [request setValue:@"https://www.youtube.com" forHTTPHeaderField:@"Origin"];
+
+    NSData *body = request.HTTPBody;
+    if (body.length) {
+        id json = [NSJSONSerialization JSONObjectWithData:body options:NSJSONReadingMutableContainers error:nil];
+        if ([json isKindOfClass:[NSMutableDictionary class]]) {
+            NSMutableDictionary *root=(NSMutableDictionary *)json;
+            NSMutableDictionary *ctx=[root[@"context"] isKindOfClass:[NSDictionary class]] ? [root[@"context"] mutableCopy] : [NSMutableDictionary dictionary];
+            NSMutableDictionary *client=[ctx[@"client"] isKindOfClass:[NSDictionary class]] ? [ctx[@"client"] mutableCopy] : [NSMutableDictionary dictionary];
+            NSString *visitor=[client[@"visitorData"] isKindOfClass:[NSString class]] ? client[@"visitorData"] : nil;
+            [client removeAllObjects];
+            client[@"clientName"]=@"TVHTML5_SIMPLY";
+            client[@"clientVersion"]=@"1.1";
+            client[@"hl"]=@"en";
+            client[@"timeZone"]=@"UTC";
+            client[@"utcOffsetMinutes"]=@0;
+            client[@"deviceMake"]=@"Sony";
+            client[@"deviceModel"]=@"PS4";
+            client[@"osName"]=@"";
+            client[@"osVersion"]=@"7.20260707.07.00";
+            client[@"clientPlatform"]=@"GAME_CONSOLE";
+            client[@"userAgent"]=@"Mozilla/5.0 (PS4; Leanback Shell) Gecko/20100101 Firefox/65.0 LeanbackShell/01.00.01.75 Sony PS4/ (PS4, , no, CH)";
+            if (visitor.length) client[@"visitorData"]=visitor;
+            ctx[@"client"]=client;
+            root[@"context"]=ctx;
+            NSData *newBody=[NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
+            if (newBody) request.HTTPBody=newBody;
+        }
+    }
+
+    NSString *u=request.URL.absoluteString;
+    if ([path containsString:@"/initplayback"]) {
+        u=YTReplaceQueryValue(u,@"c",@"TVHTML5_SIMPLY");
+        u=YTReplaceQueryValue(u,@"cver",@"1.1");
+    } else if ([path containsString:@"/videoplayback"]) {
+        NSString *ua=@"Mozilla%2F5.0%20%28PS4%3B%20Leanback%20Shell%29%20Gecko%2F20100101%20Firefox%2F65.0%20LeanbackShell%2F01.00.01.75%20Sony%20PS4%2F%20%28PS4%2C%20%2C%20no%2C%20CH%29";
+        u=YTReplaceQueryValue(u,@"user_agent",ua);
+    }
+    NSURL *nu=[NSURL URLWithString:u];
+    if (nu) request.URL=nu;
+
+    YTLog(@"FIX client-spoof applied to %@", YTSafeURL(request.URL));
+}
+
+// ---- YouTube playback recovery ----
+static IMP YTOldHandleError = NULL;
+static NSTimeInterval YTRetryWindowStart = 0;
+static NSInteger YTRetryCount = 0;
+
+static BOOL YTUnderlyingHasSPSFailure(NSError *error) {
+    NSError *cur=error;
+    for (NSInteger i=0;i<5 && cur;i++) {
+        if ([cur.domain isEqualToString:@"YTMediaError"] && cur.code==116) return YES;
+        id q=cur.userInfo[@"YTMediaErrorQOEErrorCodeKey"];
+        NSString *qs=[q description].lowercaseString;
+        if ([qs containsString:@"spsreject"] || [qs containsString:@"sps.reject"]) return YES;
+        cur=cur.userInfo[NSUnderlyingErrorKey];
+    }
+    return NO;
+}
+
+static void YTPlaybackHandleError(id selfObj, SEL _cmd, NSError *error) {
+    BOOL target = [error.domain isEqualToString:@"com.google.ios.youtube.ErrorDomain.playback"] &&
+                  (error.code==0 || error.code==14 || YTUnderlyingHasSPSFailure(error));
+    if (!target) {
+        if (YTOldHandleError) ((void(*)(id,SEL,id))YTOldHandleError)(selfObj,_cmd,error);
+        return;
+    }
+
+    NSTimeInterval now=[NSDate date].timeIntervalSince1970;
+    if (now-YTRetryWindowStart>20.0) { YTRetryWindowStart=now; YTRetryCount=0; }
+    YTRetryCount++;
+    YTLog(@"FIX playback error intercepted code=%ld retry=%ld sps=%@",(long)error.code,(long)YTRetryCount,YTUnderlyingHasSPSFailure(error)?@"YES":@"NO");
+
+    if (YTRetryCount>2) {
+        YTLog(@"FIX retry limit reached; showing original error");
+        if (YTOldHandleError) ((void(*)(id,SEL,id))YTOldHandleError)(selfObj,_cmd,error);
+        return;
+    }
+
+    id pvc=nil;
+    SEL parentVC=NSSelectorFromString(@"parentViewController");
+    if ([selfObj respondsToSelector:parentVC]) pvc=((id(*)(id,SEL))objc_msgSend)(selfObj,parentVC);
+
+    double saved=0;
+    SEL curSel=NSSelectorFromString(@"currentVideoMediaTime");
+    if (pvc && [pvc respondsToSelector:curSel]) saved=((double(*)(id,SEL))objc_msgSend)(pvc,curSel);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.12*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        id responder=nil;
+        SEL prs=NSSelectorFromString(@"parentResponder");
+        if ([selfObj respondsToSelector:prs]) responder=((id(*)(id,SEL))objc_msgSend)(selfObj,prs);
+
+        Class evc=objc_getClass("YTPlayerTapToRetryResponderEvent");
+        SEL makeSel=NSSelectorFromString(@"eventWithFirstResponder:");
+        SEL sendSel=NSSelectorFromString(@"send");
+        if (responder && evc && [evc respondsToSelector:makeSel]) {
+            id ev=((id(*)(id,SEL,id))objc_msgSend)(evc,makeSel,responder);
+            if (ev && [ev respondsToSelector:sendSel]) ((void(*)(id,SEL))objc_msgSend)(ev,sendSel);
+        }
+
+        if (pvc) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.22*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+                SEL seekSel=NSSelectorFromString(@"seekToTime:");
+                if ([pvc respondsToSelector:seekSel]) ((void(*)(id,SEL,double))objc_msgSend)(pvc,seekSel,saved);
+                SEL replaySel=NSSelectorFromString(@"replay");
+                if ([pvc respondsToSelector:replaySel]) ((void(*)(id,SEL))objc_msgSend)(pvc,replaySel);
+                YTLog(@"FIX retry issued at %.3fs",saved);
+            });
+        }
+    });
+}
+
+static void YTInstallPlaybackRecovery(void) {
+    Class cls=objc_getClass("YTMainAppVideoPlayerOverlayViewController");
+    SEL sel=NSSelectorFromString(@"handleError:");
+    Method m=cls?class_getInstanceMethod(cls,sel):NULL;
+    if (m) {
+        YTOldHandleError=method_getImplementation(m);
+        class_replaceMethod(cls,sel,(IMP)YTPlaybackHandleError,method_getTypeEncoding(m));
+        YTLog(@"FIX handleError hook installed");
+    } else {
+        YTLog(@"FIX handleError hook unavailable");
+    }
+
+    Class onesie=objc_getClass("YTIIosPlaybackOnesieConfig");
+    SEL common=NSSelectorFromString(@"hasCommonConfig");
+    Method cm=onesie?class_getInstanceMethod(onesie,common):NULL;
+    if (cm) {
+        IMP noCommon=imp_implementationWithBlock(^BOOL(id obj){ (void)obj; return NO; });
+        class_replaceMethod(onesie,common,noCommon,method_getTypeEncoding(cm));
+        YTLog(@"FIX onesie common-config bypass installed");
+    }
+}
+
+// ---- GTMSessionFetcher playback client override ----
+static IMP YTOldGTMInitRequest=NULL;
+static IMP YTOldGTMInitRequestConfig=NULL;
+
+static id YTGTMInitRequest(id selfObj, SEL _cmd, id request) {
+    if ([request isKindOfClass:[NSURLRequest class]]) {
+        NSMutableURLRequest *m=[request mutableCopy];
+        YTApplyTVSimplyClient(m);
+        request=m;
+    }
+    return YTOldGTMInitRequest ? ((id(*)(id,SEL,id))YTOldGTMInitRequest)(selfObj,_cmd,request) : selfObj;
+}
+
+static id YTGTMInitRequestConfig(id selfObj, SEL _cmd, id request, id config) {
+    if ([request isKindOfClass:[NSURLRequest class]]) {
+        NSMutableURLRequest *m=[request mutableCopy];
+        YTApplyTVSimplyClient(m);
+        request=m;
+    }
+    return YTOldGTMInitRequestConfig ? ((id(*)(id,SEL,id,id))YTOldGTMInitRequestConfig)(selfObj,_cmd,request,config) : selfObj;
+}
+
+static void YTInstallGTMFix(void) {
+    Class c=objc_getClass("GTMSessionFetcher");
+    if (!c) { YTLog(@"FIX GTMSessionFetcher unavailable"); return; }
+
+    SEL s1=NSSelectorFromString(@"initWithRequest:");
+    Method m1=class_getInstanceMethod(c,s1);
+    if (m1) {
+        YTOldGTMInitRequest=method_getImplementation(m1);
+        class_replaceMethod(c,s1,(IMP)YTGTMInitRequest,method_getTypeEncoding(m1));
+        YTLog(@"FIX GTM initWithRequest hook installed");
+    }
+
+    SEL s2=NSSelectorFromString(@"initWithRequest:configuration:");
+    Method m2=class_getInstanceMethod(c,s2);
+    if (m2) {
+        YTOldGTMInitRequestConfig=method_getImplementation(m2);
+        class_replaceMethod(c,s2,(IMP)YTGTMInitRequestConfig,method_getTypeEncoding(m2));
+        YTLog(@"FIX GTM initWithRequest:configuration: hook installed");
+    }
 }
 
 static NSString *YTResponseSummary(NSURLResponse *response) {
@@ -372,12 +582,14 @@ __attribute__((constructor)) static void YTInit(void) {
         YTHookAVPlayer();
         YTInstallNSErrorHook();
         YTInstallLowLevelHooks();
+        YTInstallPlaybackRecovery();
+        YTInstallGTMFix();
         YTInstallNetworkHooks();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallNetworkHooks();});
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallPlaybackRecovery(); YTInstallGTMFix(); YTInstallNetworkHooks();});
         YTEnsureLogFile();
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.1.2 | YouTube %@ (%@) | iOS %@ | model %@ =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.1.3 | YouTube %@ (%@) | iOS %@ | model %@ =====",ver,build,d.systemVersion,d.model);
     }
 }
