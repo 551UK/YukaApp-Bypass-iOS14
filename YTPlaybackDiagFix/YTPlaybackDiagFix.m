@@ -20,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.1.5\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.1.6\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -134,9 +134,11 @@ static id YTNSErrorFactory(id self, SEL _cmd, NSString *domain, NSInteger code, 
         YTInsideNSErrorHook = YES;
         NSString *desc = [userInfo[NSLocalizedDescriptionKey] description] ?: [err localizedDescription] ?: @"";
         id ham=userInfo[@"HAMErrorDetails"];
+        id hamReq=userInfo[@"HAMErrorURLRequest"];
         id qoe=userInfo[@"YTMediaErrorQOEErrorCodeKey"];
         NSString *extra=@"";
         if (ham) extra=[extra stringByAppendingFormat:@" HAMErrorDetails=%@",YTRedactText([ham description])];
+        if (hamReq) extra=[extra stringByAppendingFormat:@" HAMErrorURLRequest=%@",YTRedactText([hamReq description])];
         if (qoe) extra=[extra stringByAppendingFormat:@" QOE=%@",YTRedactText([qoe description])];
         YTLog(@"NSERROR !!! domain=%@ code=%ld desc=%@ keys=%@%@", domain ?: @"", (long)code, desc, userInfo.allKeys ?: @[], extra);
         YTInsideNSErrorHook = NO;
@@ -195,6 +197,10 @@ static NSString *YTReplaceQueryValue(NSString *urlString, NSString *key, NSStrin
 }
 
 static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
+    // v0.1.6 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
+    (void)request;
+    return;
+#if 0
     if (!request.URL || !YTFallbackPlaybackMode) return;
     NSString *path = request.URL.path.lowercaseString ?: @"";
     if (!YTPlaybackPath(path)) return;
@@ -245,6 +251,65 @@ static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
     if (nu) request.URL=nu;
 
     YTLog(@"FIX client-spoof applied to %@", YTSafeURL(request.URL));
+#endif
+}
+
+
+static IMP YTOldYTAppVersionLong = NULL;
+static IMP YTOldYTAppVersion = NULL;
+static BOOL YTVersionHooksInstalled = NO;
+
+static NSString *YTRealBundleVersion(void) {
+    NSString *v=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    return v.length ? v : @"19.20.2";
+}
+
+static id YTAppVersionLongHook(id cls, SEL _cmd) {
+    NSString *orig = YTOldYTAppVersionLong ? ((id(*)(id,SEL))YTOldYTAppVersionLong)(cls,_cmd) : YTRealBundleVersion();
+    if (YTFallbackPlaybackMode) {
+        NSString *real=YTRealBundleVersion();
+        if (![orig isEqualToString:real]) YTLog(@"FIX version fallback appVersionLong %@ -> %@",orig,real);
+        return real;
+    }
+    return orig;
+}
+
+static id YTAppVersionHook(id cls, SEL _cmd) {
+    NSString *orig = YTOldYTAppVersion ? ((id(*)(id,SEL))YTOldYTAppVersion)(cls,_cmd) : YTRealBundleVersion();
+    if (YTFallbackPlaybackMode) {
+        NSString *real=YTRealBundleVersion();
+        if (![orig isEqualToString:real]) YTLog(@"FIX version fallback appVersion %@ -> %@",orig,real);
+        return real;
+    }
+    return orig;
+}
+
+static void YTInstallVersionHooks(void) {
+    Class c=objc_getClass("YTVersionUtils");
+    if (!c) { YTLog(@"FIX YTVersionUtils unavailable"); return; }
+    Class meta=object_getClass(c);
+
+    SEL s1=NSSelectorFromString(@"appVersionLong");
+    Method m1=class_getClassMethod(c,s1);
+    if (m1) {
+        IMP cur=method_getImplementation(m1);
+        if (cur != (IMP)YTAppVersionLongHook) {
+            YTOldYTAppVersionLong=cur;
+            class_replaceMethod(meta,s1,(IMP)YTAppVersionLongHook,method_getTypeEncoding(m1));
+        }
+    }
+
+    SEL s2=NSSelectorFromString(@"appVersion");
+    Method m2=class_getClassMethod(c,s2);
+    if (m2) {
+        IMP cur=method_getImplementation(m2);
+        if (cur != (IMP)YTAppVersionHook) {
+            YTOldYTAppVersion=cur;
+            class_replaceMethod(meta,s2,(IMP)YTAppVersionHook,method_getTypeEncoding(m2));
+        }
+    }
+    YTVersionHooksInstalled=(m1||m2);
+    if (YTVersionHooksInstalled) YTLog(@"FIX YTVersionUtils conditional hooks installed");
 }
 
 // ---- YouTube playback recovery ----
@@ -279,7 +344,12 @@ static void YTPlaybackHandleError(id selfObj, SEL _cmd, NSError *error) {
     BOOL sps = YTUnderlyingHasSPSFailure(error);
     if (!YTFallbackPlaybackMode && (sps || error.code==0 || error.code==14)) {
         YTFallbackPlaybackMode = YES;
-        YTLog(@"FIX fallback playback mode ARMED after error code=%ld sps=%@", (long)error.code, sps?@"YES":@"NO");
+        YTLog(@"FIX fallback playback mode ARMED after error code=%ld sps=%@; using real app version %@", (long)error.code, sps?@"YES":@"NO",YTRealBundleVersion());
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(12.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            YTFallbackPlaybackMode = NO;
+            YTRetryCount = 0;
+            YTLog(@"FIX fallback playback mode DISARMED; YouTubeLegacy version spoof restored");
+        });
     }
     YTLog(@"FIX playback error intercepted code=%ld retry=%ld sps=%@",(long)error.code,(long)YTRetryCount,sps?@"YES":@"NO");
 
@@ -604,13 +674,13 @@ __attribute__((constructor)) static void YTInit(void) {
         YTInstallNSErrorHook();
         YTInstallLowLevelHooks();
         YTInstallPlaybackRecovery();
-        YTInstallGTMFix();
         YTInstallNetworkHooks();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallPlaybackRecovery(); YTInstallGTMFix(); YTInstallNetworkHooks();});
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.75*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallVersionHooks();});
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallPlaybackRecovery(); YTInstallVersionHooks(); YTInstallNetworkHooks();});
         YTEnsureLogFile();
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.1.5 | YouTube %@ (%@) | iOS %@ | model %@ | fallback=armed-on-error =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.1.6 | YouTube %@ (%@) | iOS %@ | model %@ | legacy-version-fallback=armed-on-SPS =====",ver,build,d.systemVersion,d.model);
     }
 }
