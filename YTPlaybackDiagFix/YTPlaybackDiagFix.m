@@ -20,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.1.3\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.1.4\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -247,6 +247,8 @@ static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
 
 // ---- YouTube playback recovery ----
 static IMP YTOldHandleError = NULL;
+static BOOL YTHandleErrorInstalled = NO;
+static BOOL YTOnesieInstalled = NO;
 static NSTimeInterval YTRetryWindowStart = 0;
 static NSInteger YTRetryCount = 0;
 
@@ -318,20 +320,25 @@ static void YTInstallPlaybackRecovery(void) {
     Class cls=objc_getClass("YTMainAppVideoPlayerOverlayViewController");
     SEL sel=NSSelectorFromString(@"handleError:");
     Method m=cls?class_getInstanceMethod(cls,sel):NULL;
-    if (m) {
-        YTOldHandleError=method_getImplementation(m);
-        class_replaceMethod(cls,sel,(IMP)YTPlaybackHandleError,method_getTypeEncoding(m));
+    if (!YTHandleErrorInstalled && m) {
+        IMP current=method_getImplementation(m);
+        if (current != (IMP)YTPlaybackHandleError) {
+            YTOldHandleError=current;
+            class_replaceMethod(cls,sel,(IMP)YTPlaybackHandleError,method_getTypeEncoding(m));
+        }
+        YTHandleErrorInstalled=YES;
         YTLog(@"FIX handleError hook installed");
-    } else {
+    } else if (!YTHandleErrorInstalled) {
         YTLog(@"FIX handleError hook unavailable");
     }
 
     Class onesie=objc_getClass("YTIIosPlaybackOnesieConfig");
     SEL common=NSSelectorFromString(@"hasCommonConfig");
     Method cm=onesie?class_getInstanceMethod(onesie,common):NULL;
-    if (cm) {
+    if (!YTOnesieInstalled && cm) {
         IMP noCommon=imp_implementationWithBlock(^BOOL(id obj){ (void)obj; return NO; });
         class_replaceMethod(onesie,common,noCommon,method_getTypeEncoding(cm));
+        YTOnesieInstalled=YES;
         YTLog(@"FIX onesie common-config bypass installed");
     }
 }
@@ -339,6 +346,8 @@ static void YTInstallPlaybackRecovery(void) {
 // ---- GTMSessionFetcher playback client override ----
 static IMP YTOldGTMInitRequest=NULL;
 static IMP YTOldGTMInitRequestConfig=NULL;
+static BOOL YTGTMInitRequestInstalled=NO;
+static BOOL YTGTMInitRequestConfigInstalled=NO;
 
 static id YTGTMInitRequest(id selfObj, SEL _cmd, id request) {
     if ([request isKindOfClass:[NSURLRequest class]]) {
@@ -364,17 +373,25 @@ static void YTInstallGTMFix(void) {
 
     SEL s1=NSSelectorFromString(@"initWithRequest:");
     Method m1=class_getInstanceMethod(c,s1);
-    if (m1) {
-        YTOldGTMInitRequest=method_getImplementation(m1);
-        class_replaceMethod(c,s1,(IMP)YTGTMInitRequest,method_getTypeEncoding(m1));
+    if (!YTGTMInitRequestInstalled && m1) {
+        IMP current=method_getImplementation(m1);
+        if (current != (IMP)YTGTMInitRequest) {
+            YTOldGTMInitRequest=current;
+            class_replaceMethod(c,s1,(IMP)YTGTMInitRequest,method_getTypeEncoding(m1));
+        }
+        YTGTMInitRequestInstalled=YES;
         YTLog(@"FIX GTM initWithRequest hook installed");
     }
 
     SEL s2=NSSelectorFromString(@"initWithRequest:configuration:");
     Method m2=class_getInstanceMethod(c,s2);
-    if (m2) {
-        YTOldGTMInitRequestConfig=method_getImplementation(m2);
-        class_replaceMethod(c,s2,(IMP)YTGTMInitRequestConfig,method_getTypeEncoding(m2));
+    if (!YTGTMInitRequestConfigInstalled && m2) {
+        IMP current=method_getImplementation(m2);
+        if (current != (IMP)YTGTMInitRequestConfig) {
+            YTOldGTMInitRequestConfig=current;
+            class_replaceMethod(c,s2,(IMP)YTGTMInitRequestConfig,method_getTypeEncoding(m2));
+        }
+        YTGTMInitRequestConfigInstalled=YES;
         YTLog(@"FIX GTM initWithRequest:configuration: hook installed");
     }
 }
@@ -590,6 +607,6 @@ __attribute__((constructor)) static void YTInit(void) {
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.1.3 | YouTube %@ (%@) | iOS %@ | model %@ =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.1.4 | YouTube %@ (%@) | iOS %@ | model %@ =====",ver,build,d.systemVersion,d.model);
     }
 }
