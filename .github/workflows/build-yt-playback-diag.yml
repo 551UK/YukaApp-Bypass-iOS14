@@ -1,0 +1,21 @@
+name: Build YouTube Playback Diag
+on:
+  push:
+    branches: [yt-playback-diag-build]
+    paths:
+      - 'YTPlaybackDiagFix/**'
+      - '.github/workflows/build-yt-playback-diag.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build rootful iOS tweak
+        run: bash YTPlaybackDiagFix/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YTPlaybackDiagFix-rootful
+          path: YTPlaybackDiagFix/packages/*.deb
+          if-no-files-found: error
