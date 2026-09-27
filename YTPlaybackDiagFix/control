@@ -1,6 +1,6 @@
 Package: com.551uk.ytplaybackdiagfix
 Name: YouTube Playback Diag Fix
-Version: 0.1.3
+Version: 0.1.4
 Architecture: iphoneos-arm
 Description: Rootful YouTube playback diagnostics plus SPS playback recovery and client fallback.
 Maintainer: 551UK
