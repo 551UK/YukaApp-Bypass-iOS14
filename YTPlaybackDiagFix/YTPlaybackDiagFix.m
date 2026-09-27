@@ -266,7 +266,8 @@ static void YTHookTaskClass(Class cls) {
         IMP neu=imp_implementationWithBlock(^void(NSURLSessionTask *task) {
             NSURLRequest *r=task.currentRequest ?: task.originalRequest;
             if (YTInterestingURL(r.URL)) {
-                NSString *body = YTBodySummary(r);\n                YTLog(@"NET RESUME class=%s task=%lu | %@%@",class_getName([task class]),(unsigned long)task.taskIdentifier,YTRequestSummary(r),body.length?[NSString stringWithFormat:@" | %@",body]:@"");
+                NSString *body = YTBodySummary(r);
+                YTLog(@"NET RESUME class=%s task=%lu | %@%@",class_getName([task class]),(unsigned long)task.taskIdentifier,YTRequestSummary(r),body.length?[NSString stringWithFormat:@" | %@",body]:@"");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.75*NSEC_PER_SEC)),dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{YTLogTaskSnapshot(task,@"+0.75s");});
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{YTLogTaskSnapshot(task,@"+3s");});
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(10.0*NSEC_PER_SEC)),dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{YTLogTaskSnapshot(task,@"+10s");});
