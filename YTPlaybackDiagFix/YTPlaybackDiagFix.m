@@ -20,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.1.6\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.1.7\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -197,7 +197,7 @@ static NSString *YTReplaceQueryValue(NSString *urlString, NSString *key, NSStrin
 }
 
 static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
-    // v0.1.6 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
+    // v0.1.7 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
     (void)request;
     return;
 #if 0
@@ -312,6 +312,36 @@ static void YTInstallVersionHooks(void) {
     if (YTVersionHooksInstalled) YTLog(@"FIX YTVersionUtils conditional hooks installed");
 }
 
+
+static IMP YTOldHasCommonConfig = NULL;
+static BOOL YTOnesieHookInstalled = NO;
+
+static BOOL YTHasCommonConfigHook(id selfObj, SEL _cmd) {
+    if (YTFallbackPlaybackMode) {
+        YTLog(@"FIX onesie fallback active: hasCommonConfig -> NO");
+        return NO;
+    }
+    return YTOldHasCommonConfig ? ((BOOL(*)(id,SEL))YTOldHasCommonConfig)(selfObj,_cmd) : YES;
+}
+
+static void YTInstallConditionalOnesieHook(void) {
+    if (YTOnesieHookInstalled) return;
+    Class c=objc_getClass("YTIIosPlaybackOnesieConfig");
+    SEL sel=NSSelectorFromString(@"hasCommonConfig");
+    Method m=c?class_getInstanceMethod(c,sel):NULL;
+    if (!m) {
+        YTLog(@"FIX conditional onesie hook unavailable");
+        return;
+    }
+    IMP cur=method_getImplementation(m);
+    if (cur != (IMP)YTHasCommonConfigHook) {
+        YTOldHasCommonConfig=cur;
+        class_replaceMethod(c,sel,(IMP)YTHasCommonConfigHook,method_getTypeEncoding(m));
+    }
+    YTOnesieHookInstalled=YES;
+    YTLog(@"FIX conditional onesie hook installed");
+}
+
 // ---- YouTube playback recovery ----
 static IMP YTOldHandleError = NULL;
 static BOOL YTHandleErrorInstalled = NO;
@@ -342,13 +372,13 @@ static void YTPlaybackHandleError(id selfObj, SEL _cmd, NSError *error) {
     if (now-YTRetryWindowStart>20.0) { YTRetryWindowStart=now; YTRetryCount=0; }
     YTRetryCount++;
     BOOL sps = YTUnderlyingHasSPSFailure(error);
-    if (!YTFallbackPlaybackMode && (sps || error.code==0 || error.code==14)) {
+    if (!YTFallbackPlaybackMode && sps) {
         YTFallbackPlaybackMode = YES;
-        YTLog(@"FIX fallback playback mode ARMED after error code=%ld sps=%@; using real app version %@", (long)error.code, sps?@"YES":@"NO",YTRealBundleVersion());
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(12.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        YTLog(@"FIX onesie fallback ARMED after error code=%ld sps=%@", (long)error.code, sps?@"YES":@"NO");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(15.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
             YTFallbackPlaybackMode = NO;
             YTRetryCount = 0;
-            YTLog(@"FIX fallback playback mode DISARMED; YouTubeLegacy version spoof restored");
+            YTLog(@"FIX onesie fallback DISARMED");
         });
     }
     YTLog(@"FIX playback error intercepted code=%ld retry=%ld sps=%@",(long)error.code,(long)YTRetryCount,sps?@"YES":@"NO");
@@ -674,13 +704,13 @@ __attribute__((constructor)) static void YTInit(void) {
         YTInstallNSErrorHook();
         YTInstallLowLevelHooks();
         YTInstallPlaybackRecovery();
+        YTInstallConditionalOnesieHook();
         YTInstallNetworkHooks();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.75*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallVersionHooks();});
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallPlaybackRecovery(); YTInstallVersionHooks(); YTInstallNetworkHooks();});
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallPlaybackRecovery(); YTInstallConditionalOnesieHook(); YTInstallNetworkHooks();});
         YTEnsureLogFile();
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.1.6 | YouTube %@ (%@) | iOS %@ | model %@ | legacy-version-fallback=armed-on-SPS =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.1.7 | YouTube %@ (%@) | iOS %@ | model %@ | onesie-fallback=armed-on-SPS =====",ver,build,d.systemVersion,d.model);
     }
 }
