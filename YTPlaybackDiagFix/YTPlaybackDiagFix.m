@@ -2,6 +2,9 @@
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
+#import <netdb.h>
+#import <string.h>
 
 static NSString *YTLogPath(void) {
     NSString *home = NSHomeDirectory();
@@ -16,7 +19,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.1.1\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.1.2\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -75,6 +78,95 @@ static NSString *YTRequestSummary(NSURLRequest *r) {
     if (accept.length && accept.length < 180) [parts addObject:[NSString stringWithFormat:@"Accept=%@", accept]];
     NSString *extra = parts.count ? [NSString stringWithFormat:@" [%@]", [parts componentsJoinedByString:@"; "]] : @"";
     return [NSString stringWithFormat:@"%@ %@%@", r.HTTPMethod ?: @"GET", YTSafeURL(r.URL), extra];
+}
+
+static BOOL YTIsTelemetryURL(NSURL *url) {
+    NSString *host = url.host.lowercaseString ?: @"";
+    NSString *path = url.path.lowercaseString ?: @"";
+    if (![host containsString:@"youtube.com"] && ![host containsString:@"googleapis.com"]) return NO;
+    return [path containsString:@"/api/stats/qoe"] ||
+           [path containsString:@"/api/stats/playback"] ||
+           [path containsString:@"/api/stats/watchtime"] ||
+           [path containsString:@"/api/stats/atr"] ||
+           [path containsString:@"/youtubei/v1/log_event"];
+}
+
+static NSString *YTRedactText(NSString *input) {
+    if (!input.length) return @"";
+    NSString *out = input;
+    NSArray *keys = @[@"token",@"access_token",@"refresh_token",@"authorization",@"key",@"sig",@"signature",@"cpn",@"ei"];
+    for (NSString *key in keys) {
+        NSString *pattern = [NSString stringWithFormat:@"(?i)(%@=)[^&\\s]+", key];
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+        out = [re stringByReplacingMatchesInString:out options:0 range:NSMakeRange(0, out.length) withTemplate:[NSString stringWithFormat:@"$1<redacted>"]];
+    }
+    if (out.length > 4096) out = [[out substringToIndex:4096] stringByAppendingString:@"…"];
+    return out;
+}
+
+static NSString *YTBodySummary(NSURLRequest *r) {
+    if (!r || !YTIsTelemetryURL(r.URL)) return nil;
+    NSData *body = r.HTTPBody;
+    if (!body.length) return @"body=(none/streamed)";
+    NSString *txt = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    if (txt) return [NSString stringWithFormat:@"body=%@", YTRedactText(txt)];
+    const unsigned char *b = body.bytes;
+    NSUInteger n = MIN((NSUInteger)96, body.length);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:n*2];
+    for (NSUInteger i=0;i<n;i++) [hex appendFormat:@"%02x", b[i]];
+    return [NSString stringWithFormat:@"body_hex[%lu]=%@", (unsigned long)body.length, hex];
+}
+
+static BOOL YTSuspiciousErrorDomain(NSString *domain) {
+    NSString *d = domain.lowercaseString ?: @"";
+    return [d containsString:@"url"] || [d containsString:@"network"] || [d containsString:@"avfoundation"] ||
+           [d containsString:@"media"] || [d containsString:@"youtube"] || [d containsString:@"google"] ||
+           [d containsString:@"cronet"] || [d containsString:@"http"];
+}
+
+static IMP YTOldNSErrorFactory = NULL;
+static __thread BOOL YTInsideNSErrorHook = NO;
+static id YTNSErrorFactory(id self, SEL _cmd, NSString *domain, NSInteger code, NSDictionary *userInfo) {
+    id (*oldFn)(id,SEL,NSString *,NSInteger,NSDictionary *) = (void *)YTOldNSErrorFactory;
+    id err = oldFn ? oldFn(self,_cmd,domain,code,userInfo) : nil;
+    if (!YTInsideNSErrorHook && YTSuspiciousErrorDomain(domain)) {
+        YTInsideNSErrorHook = YES;
+        NSString *desc = [userInfo[NSLocalizedDescriptionKey] description] ?: [err localizedDescription] ?: @"";
+        YTLog(@"NSERROR !!! domain=%@ code=%ld desc=%@ keys=%@", domain ?: @"", (long)code, desc, userInfo.allKeys ?: @[]);
+        YTInsideNSErrorHook = NO;
+    }
+    return err;
+}
+
+static void YTInstallNSErrorHook(void) {
+    Class meta = object_getClass([NSError class]);
+    SEL sel = @selector(errorWithDomain:code:userInfo:);
+    Method m = class_getClassMethod([NSError class], sel);
+    if (!m || !meta) { YTLog(@"NSERROR hook unavailable"); return; }
+    YTOldNSErrorFactory = method_getImplementation(m);
+    class_replaceMethod(meta, sel, (IMP)YTNSErrorFactory, method_getTypeEncoding(m));
+    YTLog(@"NSERROR hook installed");
+}
+
+static int (*YTOldGetAddrInfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = NULL;
+static int YTGetAddrInfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
+    int rc = YTOldGetAddrInfo ? YTOldGetAddrInfo(node, service, hints, res) : EAI_FAIL;
+    if (node) {
+        NSString *host = [NSString stringWithUTF8String:node];
+        NSString *h = host.lowercaseString ?: @"";
+        if ([h containsString:@"googlevideo"] || [h containsString:@"youtube"] || [h containsString:@"googleapis"]) {
+            YTLog(@"DNS %@ rc=%d (%@)", host, rc, rc == 0 ? @"ok" : [NSString stringWithUTF8String:gai_strerror(rc)]);
+        }
+    }
+    return rc;
+}
+
+typedef void (*YTMSHookFunction)(void *, void *, void **);
+static void YTInstallLowLevelHooks(void) {
+    YTMSHookFunction hook = (YTMSHookFunction)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (!hook) { YTLog(@"LOWLEVEL MSHookFunction unavailable"); return; }
+    hook((void *)getaddrinfo, (void *)YTGetAddrInfo, (void **)&YTOldGetAddrInfo);
+    YTLog(@"LOWLEVEL DNS hook installed");
 }
 
 static NSString *YTResponseSummary(NSURLResponse *response) {
@@ -174,7 +266,7 @@ static void YTHookTaskClass(Class cls) {
         IMP neu=imp_implementationWithBlock(^void(NSURLSessionTask *task) {
             NSURLRequest *r=task.currentRequest ?: task.originalRequest;
             if (YTInterestingURL(r.URL)) {
-                YTLog(@"NET RESUME class=%s task=%lu | %@",class_getName([task class]),(unsigned long)task.taskIdentifier,YTRequestSummary(r));
+                NSString *body = YTBodySummary(r);\n                YTLog(@"NET RESUME class=%s task=%lu | %@%@",class_getName([task class]),(unsigned long)task.taskIdentifier,YTRequestSummary(r),body.length?[NSString stringWithFormat:@" | %@",body]:@"");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.75*NSEC_PER_SEC)),dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{YTLogTaskSnapshot(task,@"+0.75s");});
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.0*NSEC_PER_SEC)),dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{YTLogTaskSnapshot(task,@"+3s");});
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(10.0*NSEC_PER_SEC)),dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{YTLogTaskSnapshot(task,@"+10s");});
@@ -277,12 +369,14 @@ __attribute__((constructor)) static void YTInit(void) {
         [nc addObserver:YTObserver selector:@selector(failed:) name:AVPlayerItemFailedToPlayToEndTimeNotification object:nil];
         [nc addObserver:YTObserver selector:@selector(newError:) name:AVPlayerItemNewErrorLogEntryNotification object:nil];
         YTHookAVPlayer();
+        YTInstallNSErrorHook();
+        YTInstallLowLevelHooks();
         YTInstallNetworkHooks();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallNetworkHooks();});
         YTEnsureLogFile();
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.1.1 | YouTube %@ (%@) | iOS %@ | model %@ =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.1.2 | YouTube %@ (%@) | iOS %@ | model %@ =====",ver,build,d.systemVersion,d.model);
     }
 }
