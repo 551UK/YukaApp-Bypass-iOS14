@@ -1,8 +1,8 @@
 Package: com.551uk.ytplaybackdiagfix
 Name: YouTube Playback Diag Fix
-Version: 0.2.0
+Version: 0.2.1
 Architecture: iphoneos-arm
-Description: Rootful YouTube diagnostics with safe Onesie common-config sanitizing that preserves the config object.
+Description: Rootful YouTube diagnostics with URL-preserving Onesie sanitizing for legacy playback.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
