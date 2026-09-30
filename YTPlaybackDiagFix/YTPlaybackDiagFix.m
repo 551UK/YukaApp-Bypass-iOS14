@@ -20,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.1.8\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.1.9\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -197,7 +197,7 @@ static NSString *YTReplaceQueryValue(NSString *urlString, NSString *key, NSStrin
 }
 
 static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
-    // v0.1.8 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
+    // v0.1.9 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
     (void)request;
     return;
 #if 0
@@ -314,30 +314,112 @@ static void YTInstallVersionHooks(void) {
 
 
 static IMP YTOldHasCommonConfig = NULL;
+static IMP YTOldCommonConfig = NULL;
+static IMP YTOldSetCommonConfig = NULL;
+static IMP YTOldIosPlaybackOnesieConfig = NULL;
 static BOOL YTOnesieHookInstalled = NO;
+static NSInteger YTOnesieTraceCount = 0;
+
+static void YTOnesieTrace(NSString *what) {
+    if (YTOnesieTraceCount < 20) {
+        YTOnesieTraceCount++;
+        YTLog(@"FIX onesie %@", what);
+    }
+}
 
 static BOOL YTHasCommonConfigHook(id selfObj, SEL _cmd) {
     (void)selfObj; (void)_cmd;
-    YTLog(@"FIX onesie hasCommonConfig -> NO");
+    YTOnesieTrace(@"hasCommonConfig -> NO");
     return NO;
+}
+
+static id YTCommonConfigHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTOnesieTrace(@"commonConfig -> nil");
+    return nil;
+}
+
+static void YTSetCommonConfigHook(id selfObj, SEL _cmd, id value) {
+    (void)value;
+    YTOnesieTrace(@"setCommonConfig: dropping server config");
+    if (YTOldSetCommonConfig) {
+        ((void(*)(id,SEL,id))YTOldSetCommonConfig)(selfObj,_cmd,nil);
+    }
+}
+
+static id YTIosPlaybackOnesieConfigHook(id selfObj, SEL _cmd) {
+    id obj = YTOldIosPlaybackOnesieConfig ? ((id(*)(id,SEL))YTOldIosPlaybackOnesieConfig)(selfObj,_cmd) : nil;
+    if (obj) {
+        SEL setCommon=NSSelectorFromString(@"setCommonConfig:");
+        if ([obj respondsToSelector:setCommon]) {
+            ((void(*)(id,SEL,id))objc_msgSend)(obj,setCommon,nil);
+        }
+        SEL setHas=NSSelectorFromString(@"setHasCommonConfig:");
+        if ([obj respondsToSelector:setHas]) {
+            ((void(*)(id,SEL,BOOL))objc_msgSend)(obj,setHas,NO);
+        }
+        YTOnesieTrace(@"parent iosPlaybackOnesieConfig sanitized");
+    }
+    return obj;
 }
 
 static void YTInstallConditionalOnesieHook(void) {
     if (YTOnesieHookInstalled) return;
     Class c=objc_getClass("YTIIosPlaybackOnesieConfig");
-    SEL sel=NSSelectorFromString(@"hasCommonConfig");
-    Method m=c?class_getInstanceMethod(c,sel):NULL;
-    if (!m) {
-        YTLog(@"FIX onesie common-config bypass unavailable");
+    if (!c) {
+        YTLog(@"FIX onesie common-config bypass unavailable: class missing");
         return;
     }
-    IMP cur=method_getImplementation(m);
-    if (cur != (IMP)YTHasCommonConfigHook) {
-        YTOldHasCommonConfig=cur;
-        class_replaceMethod(c,sel,(IMP)YTHasCommonConfigHook,method_getTypeEncoding(m));
+
+    BOOL installed=NO;
+
+    SEL hasSel=NSSelectorFromString(@"hasCommonConfig");
+    Method hasM=class_getInstanceMethod(c,hasSel);
+    if (hasM) {
+        IMP cur=method_getImplementation(hasM);
+        if (cur != (IMP)YTHasCommonConfigHook) {
+            YTOldHasCommonConfig=cur;
+            class_replaceMethod(c,hasSel,(IMP)YTHasCommonConfigHook,method_getTypeEncoding(hasM));
+        }
+        installed=YES;
     }
-    YTOnesieHookInstalled=YES;
-    YTLog(@"FIX onesie common-config bypass installed");
+
+    SEL getSel=NSSelectorFromString(@"commonConfig");
+    Method getM=class_getInstanceMethod(c,getSel);
+    if (getM) {
+        IMP cur=method_getImplementation(getM);
+        if (cur != (IMP)YTCommonConfigHook) {
+            YTOldCommonConfig=cur;
+            class_replaceMethod(c,getSel,(IMP)YTCommonConfigHook,method_getTypeEncoding(getM));
+        }
+        installed=YES;
+    }
+
+    SEL setSel=NSSelectorFromString(@"setCommonConfig:");
+    Method setM=class_getInstanceMethod(c,setSel);
+    if (setM) {
+        IMP cur=method_getImplementation(setM);
+        if (cur != (IMP)YTSetCommonConfigHook) {
+            YTOldSetCommonConfig=cur;
+            class_replaceMethod(c,setSel,(IMP)YTSetCommonConfigHook,method_getTypeEncoding(setM));
+        }
+        installed=YES;
+    }
+
+    Class parent=objc_getClass("YTIWatchEndpointSupportedOnesieConfig");
+    SEL parentSel=NSSelectorFromString(@"iosPlaybackOnesieConfig");
+    Method parentM=parent?class_getInstanceMethod(parent,parentSel):NULL;
+    if (parentM) {
+        IMP cur=method_getImplementation(parentM);
+        if (cur != (IMP)YTIosPlaybackOnesieConfigHook) {
+            YTOldIosPlaybackOnesieConfig=cur;
+            class_replaceMethod(parent,parentSel,(IMP)YTIosPlaybackOnesieConfigHook,method_getTypeEncoding(parentM));
+        }
+        installed=YES;
+    }
+
+    YTOnesieHookInstalled=installed;
+    YTLog(installed ? @"FIX onesie direct common-config bypass installed" : @"FIX onesie common-config bypass unavailable: selectors missing");
 }
 
 // ---- YouTube playback recovery ----
@@ -371,7 +453,7 @@ static void YTPlaybackHandleError(id selfObj, SEL _cmd, NSError *error) {
     YTRetryCount++;
     BOOL sps = YTUnderlyingHasSPSFailure(error);
     if (sps) {
-        YTLog(@"FIX SPS failure reached even with Onesie common config disabled");
+        YTLog(@"FIX SPS failure reached despite direct Onesie common-config bypass");
     }
     YTLog(@"FIX playback error intercepted code=%ld retry=%ld sps=%@",(long)error.code,(long)YTRetryCount,sps?@"YES":@"NO");
 
@@ -703,6 +785,6 @@ __attribute__((constructor)) static void YTInit(void) {
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.1.8 | YouTube %@ (%@) | iOS %@ | model %@ | onesie-commonconfig=disabled =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.1.9 | YouTube %@ (%@) | iOS %@ | model %@ | onesie-commonconfig=direct-nil =====",ver,build,d.systemVersion,d.model);
     }
 }
