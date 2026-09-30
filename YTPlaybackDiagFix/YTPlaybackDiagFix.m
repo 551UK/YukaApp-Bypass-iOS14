@@ -20,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.2.3\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.2.4\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -197,7 +197,7 @@ static NSString *YTReplaceQueryValue(NSString *urlString, NSString *key, NSStrin
 }
 
 static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
-    // v0.2.3 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
+    // v0.2.4 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
     (void)request;
     return;
 #if 0
@@ -620,7 +620,23 @@ static void YTInstallServerABRFix(void) {
     BOOL any=NO;
 
     Class cfg=objc_getClass("YTIHamplayerServerABRConfig");
-    any |= YTHookBoolMethod(cfg,@"skipFilterPreferredVideoFormats",(IMP)YTSkipFilterPreferredVideoFormatsHook,&YTOldSkipFilterPreferredVideoFormats);
+    if (cfg) {
+        SEL skipSel=NSSelectorFromString(@"skipFilterPreferredVideoFormats");
+        Method skipM=class_getInstanceMethod(cfg,skipSel);
+        if (skipM) {
+            IMP cur=method_getImplementation(skipM);
+            if (cur != (IMP)YTSkipFilterPreferredVideoFormatsHook) {
+                YTOldSkipFilterPreferredVideoFormats=cur;
+                class_replaceMethod(cfg,skipSel,(IMP)YTSkipFilterPreferredVideoFormatsHook,method_getTypeEncoding(skipM));
+            }
+            any=YES;
+        } else {
+            if (class_addMethod(cfg,skipSel,(IMP)YTSkipFilterPreferredVideoFormatsHook,"B@:")) {
+                any=YES;
+                YTLog(@"FIX serverABR added skipFilterPreferredVideoFormats method");
+            }
+        }
+    }
 
     Class hot=objc_getClass("YTHotConfig");
     any |= YTHookBoolMethod(hot,@"iosClientGlobalConfigEnableNewMlabrpolicy",(IMP)YTEnableNewMlabrpolicyHook,&YTOldEnableNewMlabrpolicy);
@@ -771,25 +787,13 @@ static void YTLogPlayerItem(AVPlayerItem *item, NSString *tag, NSError *eventErr
 }
 
 static void YTAttemptStallRecovery(AVPlayerItem *item) {
-    AVPlayer *player = item ? [YTPlayerByItem objectForKey:item] : nil;
-    if (!player) { YTLog(@"RECOVERY skipped: no AVPlayer mapped for item=%p", item); return; }
-    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-    NSNumber *last = [YTLastRecoveryByItem objectForKey:item];
-    if (last && now - last.doubleValue < 8.0) { YTLog(@"RECOVERY skipped: cooldown item=%p", item); return; }
-    [YTLastRecoveryByItem setObject:@(now) forKey:item];
-    YTLog(@"RECOVERY scheduling one-shot play item=%p at %.3fs rate=%.2f", item, CMTimeGetSeconds(player.currentTime), player.rate);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        AVPlayer *p = [YTPlayerByItem objectForKey:item];
-        if (!p || p.currentItem != item) return;
-        if (item.status != AVPlayerItemStatusReadyToPlay) { YTLog(@"RECOVERY not applied: item status=%ld", (long)item.status); return; }
-        [p play];
-        YTLog(@"RECOVERY play issued at %.3fs; rate=%.2f", CMTimeGetSeconds(p.currentTime), p.rate);
-    });
+    (void)item;
+    YTLog(@"FIX legacy stall recovery disabled; NO automatic play/retry/restart");
 }
 
 @interface YTPlaybackDiagObserver : NSObject @end
 @implementation YTPlaybackDiagObserver
-- (void)stalled:(NSNotification *)n { AVPlayerItem *i=n.object; YTLogPlayerItem(i,@"STALL",nil); YTAttemptStallRecovery(i); }
+- (void)stalled:(NSNotification *)n { AVPlayerItem *i=n.object; YTLogPlayerItem(i,@"STALL",nil); YTLog(@"FIX stall observed only; NO play/retry/restart action"); }
 - (void)failed:(NSNotification *)n { YTLogPlayerItem(n.object,@"FAILED_TO_END",n.userInfo[AVPlayerItemFailedToPlayToEndTimeErrorKey]); }
 - (void)newError:(NSNotification *)n { YTLogPlayerItem(n.object,@"NEW_ERROR_LOG",nil); }
 @end
@@ -933,6 +937,6 @@ __attribute__((constructor)) static void YTInit(void) {
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.2.3 | YouTube %@ (%@) | iOS %@ | model %@ | server-abr=client-path-complete =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.2.4 | YouTube %@ (%@) | iOS %@ | model %@ | server-abr=client-path-no-recovery | AUTO-RESTART=OFF =====",ver,build,d.systemVersion,d.model);
     }
 }
