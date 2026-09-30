@@ -20,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.2.0\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.2.1\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -197,7 +197,7 @@ static NSString *YTReplaceQueryValue(NSString *urlString, NSString *key, NSStrin
 }
 
 static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
-    // v0.2.0 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
+    // v0.2.1 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
     (void)request;
     return;
 #if 0
@@ -330,12 +330,18 @@ static void YTOnesieTrace(NSString *what) {
 static void YTSanitizeCommonConfigObject(id obj) {
     if (!obj) return;
 
-    SEL setURL=NSSelectorFromString(@"setURL:");
-    if ([obj respondsToSelector:setURL]) ((void(*)(id,SEL,id))objc_msgSend)(obj,setURL,nil);
+    BOOL hadURL=NO, hadUstreamer=NO, hadOverride=NO;
 
-    SEL setHasURL=NSSelectorFromString(@"setHasURL:");
-    if ([obj respondsToSelector:setHasURL]) ((void(*)(id,SEL,BOOL))objc_msgSend)(obj,setHasURL,NO);
+    SEL hasURLSel=NSSelectorFromString(@"hasURL");
+    if ([obj respondsToSelector:hasURLSel]) hadURL=((BOOL(*)(id,SEL))objc_msgSend)(obj,hasURLSel);
 
+    SEL hasUSel=NSSelectorFromString(@"hasUstreamerConfig");
+    if ([obj respondsToSelector:hasUSel]) hadUstreamer=((BOOL(*)(id,SEL))objc_msgSend)(obj,hasUSel);
+
+    SEL hasOSel=NSSelectorFromString(@"hasURLQueryOverride");
+    if ([obj respondsToSelector:hasOSel]) hadOverride=((BOOL(*)(id,SEL))objc_msgSend)(obj,hasOSel);
+
+    // Preserve URL/hasURL. Clearing these on 19.20.2 causes HAM InitWithParams result=-305 with an empty URL.
     SEL setUstreamer=NSSelectorFromString(@"setUstreamerConfig:");
     if ([obj respondsToSelector:setUstreamer]) ((void(*)(id,SEL,id))objc_msgSend)(obj,setUstreamer,nil);
 
@@ -348,13 +354,14 @@ static void YTSanitizeCommonConfigObject(id obj) {
     SEL setHasOverride=NSSelectorFromString(@"setHasURLQueryOverride:");
     if ([obj respondsToSelector:setHasOverride]) ((void(*)(id,SEL,BOOL))objc_msgSend)(obj,setHasOverride,NO);
 
-    YTOnesieTrace([NSString stringWithFormat:@"commonConfig sanitized safely class=%@",NSStringFromClass([obj class])]);
+    YTOnesieTrace([NSString stringWithFormat:@"commonConfig preserveURL url=%@ ustreamer=%@ override=%@ class=%@",
+        hadURL?@"YES":@"NO",hadUstreamer?@"YES":@"NO",hadOverride?@"YES":@"NO",NSStringFromClass([obj class])]);
 }
 
 static BOOL YTHasCommonConfigHook(id selfObj, SEL _cmd) {
     BOOL orig = YTOldHasCommonConfig ? ((BOOL(*)(id,SEL))YTOldHasCommonConfig)(selfObj,_cmd) : YES;
-    YTOnesieTrace([NSString stringWithFormat:@"hasCommonConfig original=%@ -> NO",orig?@"YES":@"NO"]);
-    return NO;
+    YTOnesieTrace([NSString stringWithFormat:@"hasCommonConfig preserved=%@",orig?@"YES":@"NO"]);
+    return orig;
 }
 
 static id YTCommonConfigHook(id selfObj, SEL _cmd) {
@@ -386,7 +393,7 @@ static void YTInstallConditionalOnesieHook(void) {
     if (YTOnesieHookInstalled) return;
     Class c=objc_getClass("YTIIosPlaybackOnesieConfig");
     if (!c) {
-        YTLog(@"FIX onesie safe sanitizer unavailable: class missing");
+        YTLog(@"FIX onesie URL-preserving sanitizer unavailable: class missing");
         return;
     }
 
@@ -438,7 +445,7 @@ static void YTInstallConditionalOnesieHook(void) {
     }
 
     YTOnesieHookInstalled=installed;
-    YTLog(installed ? @"FIX onesie safe common-config sanitizer installed" : @"FIX onesie safe sanitizer unavailable: selectors missing");
+    YTLog(installed ? @"FIX onesie URL-preserving sanitizer installed" : @"FIX onesie URL-preserving sanitizer unavailable: selectors missing");
 }
 
 // ---- YouTube playback recovery ----
@@ -472,7 +479,7 @@ static void YTPlaybackHandleError(id selfObj, SEL _cmd, NSError *error) {
     YTRetryCount++;
     BOOL sps = YTUnderlyingHasSPSFailure(error);
     if (sps) {
-        YTLog(@"FIX SPS failure reached despite safe Onesie common-config sanitizer");
+        YTLog(@"FIX SPS failure reached despite URL-preserving Onesie common-config sanitizer");
     }
     YTLog(@"FIX playback error intercepted code=%ld retry=%ld sps=%@",(long)error.code,(long)YTRetryCount,sps?@"YES":@"NO");
 
@@ -804,6 +811,6 @@ __attribute__((constructor)) static void YTInit(void) {
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.2.0 | YouTube %@ (%@) | iOS %@ | model %@ | onesie-commonconfig=safe-sanitize =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.2.1 | YouTube %@ (%@) | iOS %@ | model %@ | onesie-commonconfig=preserve-url =====",ver,build,d.systemVersion,d.model);
     }
 }
