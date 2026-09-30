@@ -20,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.2.1\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.2.2\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -197,7 +197,7 @@ static NSString *YTReplaceQueryValue(NSString *urlString, NSString *key, NSStrin
 }
 
 static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
-    // v0.2.1 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
+    // v0.2.2 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
     (void)request;
     return;
 #if 0
@@ -467,59 +467,11 @@ static BOOL YTUnderlyingHasSPSFailure(NSError *error) {
 }
 
 static void YTPlaybackHandleError(id selfObj, SEL _cmd, NSError *error) {
-    BOOL target = [error.domain isEqualToString:@"com.google.ios.youtube.ErrorDomain.playback"] &&
-                  (error.code==0 || error.code==14 || YTUnderlyingHasSPSFailure(error));
-    if (!target) {
-        if (YTOldHandleError) ((void(*)(id,SEL,id))YTOldHandleError)(selfObj,_cmd,error);
-        return;
-    }
-
-    NSTimeInterval now=[NSDate date].timeIntervalSince1970;
-    if (now-YTRetryWindowStart>20.0) { YTRetryWindowStart=now; YTRetryCount=0; }
-    YTRetryCount++;
     BOOL sps = YTUnderlyingHasSPSFailure(error);
-    if (sps) {
-        YTLog(@"FIX SPS failure reached despite URL-preserving Onesie common-config sanitizer");
+    if ([error.domain isEqualToString:@"com.google.ios.youtube.ErrorDomain.playback"]) {
+        YTLog(@"FIX playback error observed code=%ld sps=%@ (no auto-retry)",(long)error.code,sps?@"YES":@"NO");
     }
-    YTLog(@"FIX playback error intercepted code=%ld retry=%ld sps=%@",(long)error.code,(long)YTRetryCount,sps?@"YES":@"NO");
-
-    if (YTRetryCount>2) {
-        YTLog(@"FIX retry limit reached; showing original error");
-        if (YTOldHandleError) ((void(*)(id,SEL,id))YTOldHandleError)(selfObj,_cmd,error);
-        return;
-    }
-
-    id pvc=nil;
-    SEL parentVC=NSSelectorFromString(@"parentViewController");
-    if ([selfObj respondsToSelector:parentVC]) pvc=((id(*)(id,SEL))objc_msgSend)(selfObj,parentVC);
-
-    double saved=0;
-    SEL curSel=NSSelectorFromString(@"currentVideoMediaTime");
-    if (pvc && [pvc respondsToSelector:curSel]) saved=((double(*)(id,SEL))objc_msgSend)(pvc,curSel);
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.12*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-        id responder=nil;
-        SEL prs=NSSelectorFromString(@"parentResponder");
-        if ([selfObj respondsToSelector:prs]) responder=((id(*)(id,SEL))objc_msgSend)(selfObj,prs);
-
-        Class evc=objc_getClass("YTPlayerTapToRetryResponderEvent");
-        SEL makeSel=NSSelectorFromString(@"eventWithFirstResponder:");
-        SEL sendSel=NSSelectorFromString(@"send");
-        if (responder && evc && [evc respondsToSelector:makeSel]) {
-            id ev=((id(*)(id,SEL,id))objc_msgSend)(evc,makeSel,responder);
-            if (ev && [ev respondsToSelector:sendSel]) ((void(*)(id,SEL))objc_msgSend)(ev,sendSel);
-        }
-
-        if (pvc) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.22*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-                SEL seekSel=NSSelectorFromString(@"seekToTime:");
-                if ([pvc respondsToSelector:seekSel]) ((void(*)(id,SEL,double))objc_msgSend)(pvc,seekSel,saved);
-                SEL replaySel=NSSelectorFromString(@"replay");
-                if ([pvc respondsToSelector:replaySel]) ((void(*)(id,SEL))objc_msgSend)(pvc,replaySel);
-                YTLog(@"FIX retry issued at %.3fs",saved);
-            });
-        }
-    });
+    if (YTOldHandleError) ((void(*)(id,SEL,id))YTOldHandleError)(selfObj,_cmd,error);
 }
 
 static void YTInstallPlaybackRecovery(void) {
@@ -539,6 +491,74 @@ static void YTInstallPlaybackRecovery(void) {
     }
 
 
+}
+
+// ---- Disable server-driven ABR (based on YTUHD compatibility path) ----
+static BOOL YTServerABRInstalled = NO;
+static IMP YTOldSkipFilterPreferredVideoFormats = NULL;
+static IMP YTOldEnableNewMlabrpolicy = NULL;
+static IMP YTOldDisableServerDrivenAbr = NULL;
+static IMP YTOldPostponeCabrPreferredFormatFiltering = NULL;
+static NSInteger YTServerABRLogCount = 0;
+
+static void YTServerABRTrace(NSString *msg) {
+    if (YTServerABRLogCount < 40) {
+        YTServerABRLogCount++;
+        YTLog(@"FIX serverABR %@", msg);
+    }
+}
+
+static BOOL YTSkipFilterPreferredVideoFormatsHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTServerABRTrace(@"skipFilterPreferredVideoFormats -> NO");
+    return NO;
+}
+
+static BOOL YTEnableNewMlabrpolicyHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTServerABRTrace(@"iosClientGlobalConfigEnableNewMlabrpolicy -> NO");
+    return NO;
+}
+
+static BOOL YTDisableServerDrivenAbrHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTServerABRTrace(@"iosPlayerClientSharedConfigDisableServerDrivenAbr -> YES");
+    return YES;
+}
+
+static BOOL YTPostponeCabrPreferredFormatFilteringHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTServerABRTrace(@"iosPlayerClientSharedConfigPostponeCabrPreferredFormatFiltering -> YES");
+    return YES;
+}
+
+static BOOL YTHookBoolMethod(Class cls, NSString *selName, IMP hook, IMP *oldOut) {
+    if (!cls) return NO;
+    SEL sel=NSSelectorFromString(selName);
+    Method m=class_getInstanceMethod(cls,sel);
+    if (!m) return NO;
+    IMP cur=method_getImplementation(m);
+    if (cur != hook) {
+        if (oldOut) *oldOut=cur;
+        class_replaceMethod(cls,sel,hook,method_getTypeEncoding(m));
+    }
+    return YES;
+}
+
+static void YTInstallServerABRFix(void) {
+    if (YTServerABRInstalled) return;
+    BOOL any=NO;
+
+    Class cfg=objc_getClass("YTIHamplayerServerABRConfig");
+    any |= YTHookBoolMethod(cfg,@"skipFilterPreferredVideoFormats",(IMP)YTSkipFilterPreferredVideoFormatsHook,&YTOldSkipFilterPreferredVideoFormats);
+
+    Class hot=objc_getClass("YTHotConfig");
+    any |= YTHookBoolMethod(hot,@"iosClientGlobalConfigEnableNewMlabrpolicy",(IMP)YTEnableNewMlabrpolicyHook,&YTOldEnableNewMlabrpolicy);
+    any |= YTHookBoolMethod(hot,@"iosPlayerClientSharedConfigDisableServerDrivenAbr",(IMP)YTDisableServerDrivenAbrHook,&YTOldDisableServerDrivenAbr);
+    any |= YTHookBoolMethod(hot,@"iosPlayerClientSharedConfigPostponeCabrPreferredFormatFiltering",(IMP)YTPostponeCabrPreferredFormatFilteringHook,&YTOldPostponeCabrPreferredFormatFiltering);
+
+    YTServerABRInstalled=any;
+    YTLog(any ? @"FIX server-driven ABR compatibility hooks installed" : @"FIX server-driven ABR hooks unavailable");
 }
 
 // ---- GTMSessionFetcher playback client override ----
@@ -804,13 +824,13 @@ __attribute__((constructor)) static void YTInit(void) {
         YTInstallNSErrorHook();
         YTInstallLowLevelHooks();
         YTInstallPlaybackRecovery();
-        YTInstallConditionalOnesieHook();
+        YTInstallServerABRFix();
         YTInstallNetworkHooks();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallPlaybackRecovery(); YTInstallConditionalOnesieHook(); YTInstallNetworkHooks();});
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{YTInstallPlaybackRecovery(); YTInstallServerABRFix(); YTInstallNetworkHooks();});
         YTEnsureLogFile();
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.2.1 | YouTube %@ (%@) | iOS %@ | model %@ | onesie-commonconfig=preserve-url =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.2.2 | YouTube %@ (%@) | iOS %@ | model %@ | server-abr=disabled =====",ver,build,d.systemVersion,d.model);
     }
 }
