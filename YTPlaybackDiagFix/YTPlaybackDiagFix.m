@@ -20,7 +20,7 @@ static void YTEnsureLogFile(void) {
     NSString *dir = [YTLogPath() stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     if (![[NSFileManager defaultManager] fileExistsAtPath:YTLogPath()]) {
-        [@"YouTube Playback Diag Fix v0.2.2\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"YouTube Playback Diag Fix v0.2.3\n" writeToFile:YTLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
@@ -197,7 +197,7 @@ static NSString *YTReplaceQueryValue(NSString *urlString, NSString *key, NSStrin
 }
 
 static void YTApplyTVSimplyClient(NSMutableURLRequest *request) {
-    // v0.2.2 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
+    // v0.2.3 isolates the YouTubeLegacy version mismatch; do not mutate request client/body.
     (void)request;
     return;
 #if 0
@@ -499,6 +499,15 @@ static IMP YTOldSkipFilterPreferredVideoFormats = NULL;
 static IMP YTOldEnableNewMlabrpolicy = NULL;
 static IMP YTOldDisableServerDrivenAbr = NULL;
 static IMP YTOldPostponeCabrPreferredFormatFiltering = NULL;
+static IMP YTOldPrepareVideoDecoderForAvsbdl = NULL;
+static IMP YTOldAlwaysEnqueueDecodedSampleBuffersToAvsbdl = NULL;
+static IMP YTOldUseMediaCapabilitiesForClientFiltering = NULL;
+static IMP YTOldPopulateMoreMediaCapabilities = NULL;
+static IMP YTOldMLABRSetFormats = NULL;
+static IMP YTOldMLABROldSetFormats = NULL;
+static IMP YTOldMLABRNewSetFormats = NULL;
+static IMP YTOldHAMGetSelectable = NULL;
+static IMP YTOldHAMSetFormats = NULL;
 static NSInteger YTServerABRLogCount = 0;
 
 static void YTServerABRTrace(NSString *msg) {
@@ -532,6 +541,67 @@ static BOOL YTPostponeCabrPreferredFormatFilteringHook(id selfObj, SEL _cmd) {
     return YES;
 }
 
+static BOOL YTPrepareVideoDecoderForAvsbdlHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTServerABRTrace(@"hamplayerPrepareVideoDecoderForAvsbdl -> YES");
+    return YES;
+}
+
+static BOOL YTAlwaysEnqueueDecodedSampleBuffersToAvsbdlHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTServerABRTrace(@"hamplayerAlwaysEnqueueDecodedSampleBuffersToAvsbdl -> YES");
+    return YES;
+}
+
+static BOOL YTUseMediaCapabilitiesForClientFilteringHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTServerABRTrace(@"useMediaCapabilitiesForClientFiltering -> NO");
+    return NO;
+}
+
+static BOOL YTPopulateMoreMediaCapabilitiesHook(id selfObj, SEL _cmd) {
+    (void)selfObj; (void)_cmd;
+    YTServerABRTrace(@"populateMoreMediaCapabilities -> YES");
+    return YES;
+}
+
+static void YTMLABRSetFormatsHook(id selfObj, SEL _cmd, NSArray *formats) {
+    YTServerABRTrace([NSString stringWithFormat:@"MLABR setFormats count=%lu",(unsigned long)formats.count]);
+    Class cls=object_getClass(selfObj);
+    (void)cls;
+    IMP old=NULL;
+    NSString *name=NSStringFromClass([selfObj class]);
+    if ([name isEqualToString:@"MLABRPolicy"]) old=YTOldMLABRSetFormats;
+    else if ([name isEqualToString:@"MLABRPolicyOld"]) old=YTOldMLABROldSetFormats;
+    else old=YTOldMLABRNewSetFormats;
+    if (old) ((void(*)(id,SEL,id))old)(selfObj,_cmd,formats);
+}
+
+static id YTHAMGetSelectableHook(id selfObj, SEL _cmd, NSError **error) {
+    @try { [selfObj setValue:@(NO) forKey:@"_postponePreferredFormatFiltering"]; } @catch (__unused id ex) {}
+    YTServerABRTrace(@"HAM getSelectableFormatData");
+    return YTOldHAMGetSelectable ? ((id(*)(id,SEL,NSError **))YTOldHAMGetSelectable)(selfObj,_cmd,error) : nil;
+}
+
+static void YTHAMSetFormatsHook(id selfObj, SEL _cmd, NSArray *formats) {
+    @try { [selfObj setValue:@(YES) forKey:@"_postponePreferredFormatFiltering"]; } @catch (__unused id ex) {}
+    YTServerABRTrace([NSString stringWithFormat:@"HAM setFormats count=%lu",(unsigned long)formats.count]);
+    if (YTOldHAMSetFormats) ((void(*)(id,SEL,id))YTOldHAMSetFormats)(selfObj,_cmd,formats);
+}
+
+static BOOL YTHookVoidArrayMethod(Class cls, NSString *selName, IMP hook, IMP *oldOut) {
+    if (!cls) return NO;
+    SEL sel=NSSelectorFromString(selName);
+    Method m=class_getInstanceMethod(cls,sel);
+    if (!m) return NO;
+    IMP cur=method_getImplementation(m);
+    if (cur != hook) {
+        if (oldOut) *oldOut=cur;
+        class_replaceMethod(cls,sel,hook,method_getTypeEncoding(m));
+    }
+    return YES;
+}
+
 static BOOL YTHookBoolMethod(Class cls, NSString *selName, IMP hook, IMP *oldOut) {
     if (!cls) return NO;
     SEL sel=NSSelectorFromString(selName);
@@ -556,6 +626,38 @@ static void YTInstallServerABRFix(void) {
     any |= YTHookBoolMethod(hot,@"iosClientGlobalConfigEnableNewMlabrpolicy",(IMP)YTEnableNewMlabrpolicyHook,&YTOldEnableNewMlabrpolicy);
     any |= YTHookBoolMethod(hot,@"iosPlayerClientSharedConfigDisableServerDrivenAbr",(IMP)YTDisableServerDrivenAbrHook,&YTOldDisableServerDrivenAbr);
     any |= YTHookBoolMethod(hot,@"iosPlayerClientSharedConfigPostponeCabrPreferredFormatFiltering",(IMP)YTPostponeCabrPreferredFormatFilteringHook,&YTOldPostponeCabrPreferredFormatFiltering);
+    any |= YTHookBoolMethod(hot,@"iosPlayerClientSharedConfigHamplayerPrepareVideoDecoderForAvsbdl",(IMP)YTPrepareVideoDecoderForAvsbdlHook,&YTOldPrepareVideoDecoderForAvsbdl);
+    any |= YTHookBoolMethod(hot,@"iosPlayerClientSharedConfigHamplayerAlwaysEnqueueDecodedSampleBuffersToAvsbdl",(IMP)YTAlwaysEnqueueDecodedSampleBuffersToAvsbdlHook,&YTOldAlwaysEnqueueDecodedSampleBuffersToAvsbdl);
+    any |= YTHookBoolMethod(hot,@"iosPlayerClientSharedConfigUseMediaCapabilitiesForClientFiltering",(IMP)YTUseMediaCapabilitiesForClientFilteringHook,&YTOldUseMediaCapabilitiesForClientFiltering);
+    any |= YTHookBoolMethod(hot,@"iosPlayerClientSharedConfigPopulateMoreMediaCapabilities",(IMP)YTPopulateMoreMediaCapabilitiesHook,&YTOldPopulateMoreMediaCapabilities);
+
+    any |= YTHookVoidArrayMethod(objc_getClass("MLABRPolicy"),@"setFormats:",(IMP)YTMLABRSetFormatsHook,&YTOldMLABRSetFormats);
+    any |= YTHookVoidArrayMethod(objc_getClass("MLABRPolicyOld"),@"setFormats:",(IMP)YTMLABRSetFormatsHook,&YTOldMLABROldSetFormats);
+    any |= YTHookVoidArrayMethod(objc_getClass("MLABRPolicyNew"),@"setFormats:",(IMP)YTMLABRSetFormatsHook,&YTOldMLABRNewSetFormats);
+
+    Class ham=objc_getClass("HAMDefaultABRPolicy");
+    if (ham) {
+        SEL getSel=NSSelectorFromString(@"getSelectableFormatDataAndReturnError:");
+        Method getM=class_getInstanceMethod(ham,getSel);
+        if (getM) {
+            IMP cur=method_getImplementation(getM);
+            if (cur != (IMP)YTHAMGetSelectableHook) {
+                YTOldHAMGetSelectable=cur;
+                class_replaceMethod(ham,getSel,(IMP)YTHAMGetSelectableHook,method_getTypeEncoding(getM));
+            }
+            any=YES;
+        }
+        SEL setSel=NSSelectorFromString(@"setFormats:");
+        Method setM=class_getInstanceMethod(ham,setSel);
+        if (setM) {
+            IMP cur=method_getImplementation(setM);
+            if (cur != (IMP)YTHAMSetFormatsHook) {
+                YTOldHAMSetFormats=cur;
+                class_replaceMethod(ham,setSel,(IMP)YTHAMSetFormatsHook,method_getTypeEncoding(setM));
+            }
+            any=YES;
+        }
+    }
 
     YTServerABRInstalled=any;
     YTLog(any ? @"FIX server-driven ABR compatibility hooks installed" : @"FIX server-driven ABR hooks unavailable");
@@ -831,6 +933,6 @@ __attribute__((constructor)) static void YTInit(void) {
         NSString *ver=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         NSString *build=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?";
         UIDevice *d=UIDevice.currentDevice;
-        YTLog(@"===== START v0.2.2 | YouTube %@ (%@) | iOS %@ | model %@ | server-abr=disabled =====",ver,build,d.systemVersion,d.model);
+        YTLog(@"===== START v0.2.3 | YouTube %@ (%@) | iOS %@ | model %@ | server-abr=client-path-complete =====",ver,build,d.systemVersion,d.model);
     }
 }
